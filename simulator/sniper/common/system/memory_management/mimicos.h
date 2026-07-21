@@ -15,6 +15,8 @@
 #include "certificates/radix_address_space_view.h"
 #include "certificates/mutation_listener.h"
 #include "certificates/hint_flags.h"
+#include "certificates/adaptive_cow_estimator.h"
+#include <unordered_set>
 
 #include <unordered_map>
 #include <memory>
@@ -243,6 +245,7 @@ public:
         vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
         if (!view)
             return;
+        vtsaNotifyEstimator(app_id, (uint64_t)va, bytes);
         m_vtsa_cert_manager->on_mutation(view, (uint64_t)va, bytes);
         for (auto *l : m_vtsa_sweep_listeners)
             l->vtsaSweep(view, (uint64_t)va, bytes, unmap_op);
@@ -322,6 +325,152 @@ public:
     }
 
     UInt64 vtsaHintRegisteredCount() const { return m_vtsa_hint_registered; }
+
+    /* Revocations observed by the adaptive gate: one event per affected
+     * hint region (same-clock coalescing happens inside the estimator). */
+    void vtsaNotifyEstimator(int app_id, uint64_t va, uint64_t bytes)
+    {
+        if (!m_vtsa_estimator)
+            return;
+        auto it = m_vtsa_hint_regions.find(app_id);
+        if (it == m_vtsa_hint_regions.end())
+            return;
+        for (const auto &r : it->second)
+            if (va < r.base + r.len && r.base < va + bytes)
+                m_vtsa_estimator->observe_revocation(r.site_id);
+    }
+
+
+    // ============ V-TSA emulated fork/CoW (option 5b of the port plan) ==
+    // No simulated child: fork_mark snapshots the parent's registered
+    // regions (RO+COW overlay + per-frame refcounts), revokes ALL
+    // certificates, and sweeps with 4KB shootdown so every subsequent
+    // access misses the TLB and COW writes are detectable at the miss
+    // path. Child-side execution carries no V-TSA claim; parent-side
+    // revocation, reach loss, and copy amplification are what get priced.
+
+    void vtsaForkMark(int app_id)
+    {
+        vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
+        ParametricDramDirectoryMSI::PageTable *pt = getPageTable(app_id);
+        auto it = m_vtsa_hint_regions.find(app_id);
+        if (!view || !pt || it == m_vtsa_hint_regions.end())
+            return;
+        auto &cow = m_vtsa_cow_pages[app_id];
+        for (const auto &r : it->second) {
+            for (uint64_t va = r.base & ~(vtsa::kPageSize - 1);
+                 va < r.base + r.len; va += vtsa::kPageSize) {
+                IntPtr ppn = 0;
+                int psize = 0;
+                if (!pt->functionalLookup((IntPtr)va, &ppn, &psize))
+                    continue;
+                uint64_t vpn = va >> vtsa::kPageShift;
+                uint64_t frame =
+                    psize == 21
+                        ? (uint64_t)ppn + (vpn & (vtsa::kHugeFrames - 1))
+                        : (uint64_t)ppn;
+                if (cow.count(vpn)) {
+                    m_vtsa_frame_refs[frame]++;
+                } else {
+                    cow.insert(vpn);
+                    view->set_perms(vpn, vtsa::kPermU); /* drop W */
+                    uint64_t &refs = m_vtsa_frame_refs[frame];
+                    refs = refs ? refs + 1 : 2;
+                }
+                m_vtsa_cow_stats_pages_marked++;
+            }
+            /* revoke + sweep (with 4KB shootdown) region by region */
+            vtsaMutationSweepUnmapStyle(app_id, (IntPtr)r.base, r.len);
+        }
+        m_vtsa_cow_stats_fork_marks++;
+    }
+
+    bool vtsaIsCow(int app_id, uint64_t va) const
+    {
+        auto it = m_vtsa_cow_pages.find(app_id);
+        return it != m_vtsa_cow_pages.end() &&
+               it->second.count(va >> vtsa::kPageShift) != 0;
+    }
+
+    /* Resolve a COW write fault: copy when shared, reuse when last owner;
+     * either way the write is a mutation (revoke + sweep). Returns true
+     * if a copy (frame migration) happened. */
+    bool vtsaCowResolve(int app_id, IntPtr va, UInt64 core_id)
+    {
+        vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
+        ParametricDramDirectoryMSI::PageTable *pt = getPageTable(app_id);
+        auto &cow = m_vtsa_cow_pages[app_id];
+        uint64_t vpn = (uint64_t)va >> vtsa::kPageShift;
+        cow.erase(vpn);
+        if (view)
+            view->set_perms(vpn, vtsa::kPermW | vtsa::kPermU);
+        bool copied = false;
+        IntPtr ppn = 0;
+        int psize = 0;
+        if (pt && pt->functionalLookup(va & ~(IntPtr)(vtsa::kPageSize - 1),
+                                       &ppn, &psize) && psize == 12) {
+            uint64_t &refs = m_vtsa_frame_refs[(uint64_t)ppn];
+            if (refs > 1) {
+                auto alloc = m_memory_allocator->allocate(
+                    4096, (UInt64)va, core_id, false, false);
+                if (alloc.first != (UInt64)-1 && alloc.second == 12) {
+                    pt->updatePageTableFrames(
+                        va & ~(IntPtr)(vtsa::kPageSize - 1), core_id,
+                        (IntPtr)alloc.first, 12, {});
+                    copied = true;
+                    m_vtsa_cow_stats_copies++;
+                }
+                refs--;
+            } else {
+                m_vtsa_frame_refs.erase((uint64_t)ppn);
+                m_vtsa_cow_stats_reuses++;
+            }
+        }
+        m_vtsa_cow_stats_faults++;
+        vtsaMutation(app_id, va & ~(IntPtr)(vtsa::kPageSize - 1),
+                     vtsa::kPageSize, false);
+        return copied;
+    }
+
+    UInt64 vtsaCowStat(int which) const
+    {
+        switch (which) {
+        case 0: return m_vtsa_cow_stats_fork_marks;
+        case 1: return m_vtsa_cow_stats_pages_marked;
+        case 2: return m_vtsa_cow_stats_faults;
+        case 3: return m_vtsa_cow_stats_copies;
+        default: return m_vtsa_cow_stats_reuses;
+        }
+    }
+
+    // The adaptive gate lives OS-side (one causal view across cores).
+    vtsa::AdaptiveCowEstimator* getVtsaEstimator(uint64_t walk_cycles,
+                                                 uint64_t cert_cycles,
+                                                 uint64_t rlb_cycles)
+    {
+        if (!m_vtsa_estimator)
+            m_vtsa_estimator.reset(new vtsa::AdaptiveCowEstimator(
+                walk_cycles, cert_cycles, rlb_cycles));
+        return m_vtsa_estimator.get();
+    }
+    vtsa::AdaptiveCowEstimator* getVtsaEstimatorRaw()
+    {
+        return m_vtsa_estimator.get();
+    }
+
+    /* Like vtsaMutation but sweeps 4KB entries too (fork/unmap style). */
+    void vtsaMutationSweepUnmapStyle(int app_id, IntPtr va, UInt64 bytes)
+    {
+        if (!vtsaActive())
+            return;
+        vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
+        if (!view)
+            return;
+        vtsaNotifyEstimator(app_id, (uint64_t)va, bytes);
+        m_vtsa_cert_manager->on_mutation(view, (uint64_t)va, bytes);
+        for (auto *l : m_vtsa_sweep_listeners)
+            l->vtsaSweep(view, (uint64_t)va, bytes, true);
+    }
 
     // ============ Memory Allocator ============
 
@@ -561,6 +710,14 @@ private:
     std::vector<vtsa::MutationSweepListener*> m_vtsa_sweep_listeners;
     std::unordered_map<int, std::vector<vtsa::HintRegion>> m_vtsa_hint_regions;
     UInt64 m_vtsa_hint_registered = 0;
+    std::unordered_map<int, std::unordered_set<uint64_t>> m_vtsa_cow_pages;
+    std::unordered_map<uint64_t, uint64_t> m_vtsa_frame_refs;
+    std::unique_ptr<vtsa::AdaptiveCowEstimator> m_vtsa_estimator;
+    UInt64 m_vtsa_cow_stats_fork_marks = 0;
+    UInt64 m_vtsa_cow_stats_pages_marked = 0;
+    UInt64 m_vtsa_cow_stats_faults = 0;
+    UInt64 m_vtsa_cow_stats_copies = 0;
+    UInt64 m_vtsa_cow_stats_reuses = 0;
     
     // ============ Page Fault State (per-core) ============
     std::vector<PageFaultState> m_pf_states;

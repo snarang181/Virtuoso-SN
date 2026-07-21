@@ -136,6 +136,7 @@ namespace ParametricDramDirectoryMSI
 			if (vtsa_mode == "hardware_k") m_vtsa_mode = VTSA_MODE_HARDWARE_K;
 			else if (vtsa_mode == "off") m_vtsa_mode = VTSA_MODE_OFF;
 			else if (vtsa_mode == "certified") m_vtsa_mode = VTSA_MODE_CERTIFIED;
+			else if (vtsa_mode == "adaptive") m_vtsa_mode = VTSA_MODE_ADAPTIVE;
 			else m_vtsa_mode = VTSA_MODE_AUTO_CERTIFY;
 			m_vtsa_k_budget = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/k_budget");
 			m_vtsa_miss_threshold = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/miss_threshold");
@@ -145,10 +146,17 @@ namespace ParametricDramDirectoryMSI
 			m_vtsa_rlb_miss_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/rlb_miss_cycles"));
 			m_vtsa_pte_probe_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/pte_probe_cycles"));
 			m_vtsa_metadata_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/metadata_lookup_cycles"));
+			m_vtsa_cow_fault_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cow_fault_cycles"));
+			m_vtsa_cow_copy_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cow_copy_cycles"));
 			memset(&vtsa_stats, 0, sizeof(vtsa_stats));
 			registerVTSAStats();
 			if (m_vtsa_mode != VTSA_MODE_OFF)
 				Sim()->getMimicOS()->vtsaRegisterSweepListener(this);
+			if (m_vtsa_mode == VTSA_MODE_ADAPTIVE)
+				Sim()->getMimicOS()->getVtsaEstimator(
+					Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/estimator_walk_cycles"),
+					Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cert_check_cycles"),
+					Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/rlb_miss_cycles"));
 		}
         std::cout << std::endl;
     }
@@ -428,6 +436,18 @@ namespace ParametricDramDirectoryMSI
 
     IntPtr MemoryManagementUnitVTSA::performAddressTranslation(IntPtr eip, IntPtr address, bool instruction, Core::lock_signal_t lock, bool modeled, bool count)
     {
+        // Adaptive gate: the causal clock counts EVERY region access.
+        if (m_vtsa_mode == VTSA_MODE_ADAPTIVE && count && !instruction)
+        {
+            vtsa::AdaptiveCowEstimator *vtsa_est = Sim()->getMimicOS()->getVtsaEstimatorRaw();
+            if (vtsa_est)
+            {
+                vtsa::HintRegion vtsa_hr;
+                if (Sim()->getMimicOS()->vtsaHintFor(core->getThread()->getAppId(), (uint64_t)address, &vtsa_hr))
+                    vtsa_est->note_access(vtsa_hr.site_id);
+            }
+        }
+
         // Track DRAM accesses for this walk (useful for power/performance analysis)
         dram_accesses_during_last_walk = 0;
 
@@ -798,6 +818,7 @@ namespace ParametricDramDirectoryMSI
         SubsecondTime total_fault_latency = SubsecondTime::Zero();
         SubsecondTime translation_latency = charged_tlb_latency;
         [[maybe_unused]] bool performed_ptw = false;
+        bool vtsa_suppress_fill = false;  // COW read: keep the page missing so writes stay detectable
 #if ENABLE_MMU_CSV_LOGS
         bool page_metrics_updated = false;
 #endif
@@ -963,7 +984,38 @@ namespace ParametricDramDirectoryMSI
                 SubsecondTime vtsa_latency = SubsecondTime::Zero();
                 int vtsa_bits = 0;
                 IntPtr vtsa_ppn = 0;
-                if (vtsaConsult(address, count, vtsa_latency, vtsa_bits, vtsa_ppn))
+
+                // Emulated COW: a write miss to a COW page resolves the
+                // fault (copy or reuse; revoke + sweep); a read miss stays
+                // uncached so the eventual write is still detectable.
+                MimicOS *vtsa_os = Sim()->getMimicOS();
+                if (vtsa_os->vtsaIsCow(core->getThread()->getAppId(), (uint64_t)address))
+                {
+                    if (m_vtsa_access_is_write)
+                    {
+                        bool vtsa_copied = vtsa_os->vtsaCowResolve(core->getThread()->getAppId(), address, core->getId());
+                        vtsa_latency += m_vtsa_cow_fault_latency->getLatency();
+                        if (vtsa_copied)
+                            vtsa_latency += m_vtsa_cow_copy_latency->getLatency();
+                        if (count)
+                        {
+                            vtsa_stats.cow_faults++;
+                            if (vtsa_copied) vtsa_stats.cow_copies++;
+                        }
+                        // the frame may have moved: refresh the walked ppn
+                        vtsa::RadixAddressSpaceView *vtsa_view = vtsa_os->getVtsaView(core->getThread()->getAppId());
+                        vtsa::PageInfo vtsa_pi;
+                        if (vtsa_view && vtsa_view->translate((uint64_t)address & ~(uint64_t)4095, vtsa_pi) && vtsa_pi.present)
+                            ppn_result = (IntPtr)vtsa_pi.frame;
+                    }
+                    else
+                    {
+                        vtsa_suppress_fill = true;
+                        if (count) vtsa_stats.cow_read_suppressed++;
+                    }
+                }
+
+                if (!vtsa_suppress_fill && vtsaConsult(address, count, vtsa_latency, vtsa_bits, vtsa_ppn))
                 {
                     page_size = vtsa_bits;
                     ppn_result = vtsa_ppn;
@@ -1082,7 +1134,7 @@ namespace ParametricDramDirectoryMSI
                 // 2) TLB policy is "allocate on miss"
                 // 3) Either TLB missed OR hit was at higher level (need to fill lower)
                 
-                if (alloc_tlbs[i][j]->supportsPageSize(page_size) && alloc_tlbs[i][j]->getAllocateOnMiss() && (!hit || hit_level > i))
+                if (!vtsa_suppress_fill && alloc_tlbs[i][j]->supportsPageSize(page_size) && alloc_tlbs[i][j]->getAllocateOnMiss() && (!hit || hit_level > i))
                 {
                     mmu_log->detailed(std::string(alloc_tlbs[i][j]->getName().c_str()) + " supports page size " + std::to_string(page_size));
                     mmu_log->detailed("Allocating in TLB: Level=" + std::to_string(i) + " Index=" + std::to_string(j) + 
@@ -1680,6 +1732,11 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_hint_qualified", &vtsa_stats.hint_qualified);
 		registerStatsMetric(name, core->getId(), "vtsa_hint_disqualified", &vtsa_stats.hint_disqualified);
 		registerStatsMetric(name, core->getId(), "vtsa_hint_absent", &vtsa_stats.hint_absent);
+		registerStatsMetric(name, core->getId(), "vtsa_cow_faults", &vtsa_stats.cow_faults);
+		registerStatsMetric(name, core->getId(), "vtsa_cow_copies", &vtsa_stats.cow_copies);
+		registerStatsMetric(name, core->getId(), "vtsa_cow_read_suppressed", &vtsa_stats.cow_read_suppressed);
+		registerStatsMetric(name, core->getId(), "vtsa_adaptive_certifies", &vtsa_stats.adaptive_certifies);
+		registerStatsMetric(name, core->getId(), "vtsa_adaptive_refusals", &vtsa_stats.adaptive_refusals);
 	}
 
 	/* The V-TSA miss-path consult.  Page-table authority is preserved: this
@@ -1793,7 +1850,51 @@ namespace ParametricDramDirectoryMSI
 		// epoch (tlb_sim.py constants). Disqualified/hint-less windows
 		// fall back to nothing (bounded reach comes from the baseline
 		// scheme, compared on identical state).
-		if (m_vtsa_mode == VTSA_MODE_CERTIFIED)
+		if (m_vtsa_mode == VTSA_MODE_ADAPTIVE)
+		{
+			// hint-gated like certified, except COW-marked regions consult
+			// the causal estimator instead of statically refusing.
+			extra_latency += m_vtsa_metadata_latency->getLatency();
+			vtsa::HintRegion hr;
+			if (!Sim()->getMimicOS()->vtsaHintFor(app_id, (uint64_t)address, &hr))
+			{
+				if (count) vtsa_stats.hint_absent++;
+				return false;
+			}
+			bool gate_ok;
+			if (hr.flags & vtsa::kHintCowSensitive)
+			{
+				uint32_t flags_ex_cow = hr.flags & ~vtsa::kHintCowSensitive;
+				gate_ok = vtsa::hint_qualifies(flags_ex_cow);
+				if (gate_ok)
+				{
+					vtsa::AdaptiveCowEstimator *est = Sim()->getMimicOS()->getVtsaEstimator(
+						Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/estimator_walk_cycles"),
+						Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cert_check_cycles"),
+						Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/rlb_miss_cycles"));
+					gate_ok = est->decide(hr.site_id);
+					if (count)
+					{
+						if (gate_ok) vtsa_stats.adaptive_certifies++;
+						else vtsa_stats.adaptive_refusals++;
+					}
+				}
+				else if (count)
+					vtsa_stats.hint_disqualified++;
+			}
+			else
+			{
+				gate_ok = vtsa::hint_qualifies(hr.flags);
+				if (count)
+				{
+					if (gate_ok) vtsa_stats.hint_qualified++;
+					else vtsa_stats.hint_disqualified++;
+				}
+			}
+			if (!gate_ok)
+				return false;
+		}
+		else if (m_vtsa_mode == VTSA_MODE_CERTIFIED)
 		{
 			IntPtr hint_window = address >> 21;
 			auto hv = m_vtsa_hint_verdict_cache.find(hint_window);

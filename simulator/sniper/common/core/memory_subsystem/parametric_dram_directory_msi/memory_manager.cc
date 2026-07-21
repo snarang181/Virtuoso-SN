@@ -618,6 +618,7 @@ namespace ParametricDramDirectoryMSI
 			log_file_mmu << "Memory Access: " << address << " Initiating Translation at time " << getShmemPerfModel()->getElapsedTime(ShmemPerfModel::_USER_THREAD).getNS() << std::endl;
 #endif
 			// translation result is a pair containing the total latency of the translation and the translated physical address
+			m_mmu->setVtsaAccessIsWrite(mem_op_type == Core::WRITE);
 			translation_result = m_mmu->performAddressTranslation(eip, address,
 																  is_instruction,
 																  lock_signal,

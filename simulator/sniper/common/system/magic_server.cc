@@ -251,6 +251,13 @@ UInt64 MagicServer::Magic_unlocked(thread_id_t thread_id, core_id_t core_id, UIn
    {
       // V-TSA hint ops: arg0 = command, arg1 = pointer (in traced-app
       // memory) to a packed descriptor read via accessMemory.
+      if (arg0 == vtsa::kVtsaCmdForkMark)
+      {
+         Core *vtsa_core = Sim()->getCoreManager()->getCoreFromID(core_id);
+         Thread *vtsa_thread = vtsa_core->getThread();
+         Sim()->getMimicOS()->vtsaForkMark(vtsa_thread ? vtsa_thread->getAppId() : 0);
+         return 0;
+      }
       if (arg0 == vtsa::kVtsaCmdRegionRegister ||
           arg0 == vtsa::kVtsaCmdRegionUnregister ||
           arg0 == vtsa::kVtsaCmdMprotect)

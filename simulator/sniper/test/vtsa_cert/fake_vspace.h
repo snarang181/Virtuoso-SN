@@ -28,6 +28,7 @@
 #include <cassert>
 #include <cstdint>
 #include <map>
+#include <vector>
 
 namespace vtsa_test
 {
@@ -48,6 +49,21 @@ class FakePmm
 public:
     uint64_t alloc_frame() { return m_next++; }
 
+    /* Emulated per-frame COW refcounts (cow.c discipline: first share
+     * sets 2, further marks +1, copy/reuse decrements). */
+    uint64_t cow_refs(uint64_t frame) const
+    {
+        auto it = m_refs.find(frame);
+        return it == m_refs.end() ? 0 : it->second;
+    }
+    void cow_ref_set(uint64_t frame, uint64_t v)
+    {
+        if (v == 0)
+            m_refs.erase(frame);
+        else
+            m_refs[frame] = v;
+    }
+
     uint64_t alloc_aligned_run(uint64_t frames)
     {
         uint64_t base = (m_next + frames - 1) / frames * frames;
@@ -57,6 +73,7 @@ public:
 
 private:
     uint64_t m_next = 1; /* frame 0 reserved so frame!=0 when present */
+    std::map<uint64_t, uint64_t> m_refs;
 };
 
 struct DaemonPolicy
@@ -68,6 +85,15 @@ struct DaemonStats
 {
     uint64_t promotions = 0;
     uint64_t demotions = 0;
+};
+
+struct CowStats
+{
+    uint64_t fork_marks = 0;
+    uint64_t pages_marked = 0;
+    uint64_t cow_faults = 0;
+    uint64_t cow_copies = 0;
+    uint64_t cow_reuses = 0;
 };
 
 class FakeVspace : public AddressSpaceView
@@ -119,14 +145,75 @@ public:
         PageInfo pi;
         translate(pva(page), pi);
         if (!pi.present) {
-            m_pages[page] = Pte{m_pmm->alloc_frame(), m_default_perms};
+            m_pages[page] = Pte{m_pmm->alloc_frame(), m_default_perms, false};
             pi.present = true;
             pi.perms = m_default_perms;
         }
-        if (is_write && !(pi.perms & kPermW))
-            return false; /* protection violation (no COW until Phase 5) */
+        if (is_write) {
+            auto it = m_pages.find(page);
+            if (it != m_pages.end() && it->second.cow)
+                return cow_write(page); /* COW fault, always resolvable */
+            if (!(pi.perms & kPermW))
+                return false; /* genuine protection violation */
+        }
         return true;
     }
+
+    /* fork_mark: the cow.c fork sequence on the single emulated space -
+     * demote 2MB leaves (deferred huge-COW), mark present writable 4KB
+     * pages RO+COW with frame refcounts, then revoke ALL live certs of
+     * the space (cow.c:312 conservative discipline). */
+    void fork_mark()
+    {
+        std::vector<uint64_t> wins;
+        for (auto &kv : m_huge)
+            wins.push_back(kv.first);
+        for (uint64_t w : wins)
+            demote(m_base + w * kHugeSize);
+        for (auto &kv : m_pages) {
+            Pte &p = kv.second;
+            if (!(p.perms & kPermW) && !p.cow)
+                continue; /* read-only non-COW pages shared as-is */
+            if (!p.cow) {
+                p.cow = true;
+                p.perms &= ~kPermW;
+                uint64_t refs = m_pmm->cow_refs(p.frame);
+                m_pmm->cow_ref_set(p.frame, refs ? refs + 1 : 2);
+            } else {
+                m_pmm->cow_ref_set(p.frame, m_pmm->cow_refs(p.frame) + 1);
+            }
+            m_cstats.pages_marked++;
+        }
+        m_cstats.fork_marks++;
+        notify(0, m_region_pages); /* revoke-all */
+    }
+
+    const CowStats &cow_stats() const { return m_cstats; }
+
+private:
+    /* COW write fault: copy when shared, reuse when last owner; either
+     * way the write is a mutation (revoke overlapping certs). */
+    bool cow_write(uint64_t page)
+    {
+        Pte &p = m_pages[page];
+        uint64_t refs = m_pmm->cow_refs(p.frame);
+        m_cstats.cow_faults++;
+        if (refs > 1) {
+            uint64_t nf = m_pmm->alloc_frame();
+            m_pmm->cow_ref_set(p.frame, refs - 1);
+            p.frame = nf;
+            m_cstats.cow_copies++;
+        } else {
+            m_pmm->cow_ref_set(p.frame, 0);
+            m_cstats.cow_reuses++;
+        }
+        p.cow = false;
+        p.perms |= kPermW;
+        notify(page, 1);
+        return true;
+    }
+
+public:
 
     /* ---- mutating ops: each one notifies the cert manager ----------- */
 
@@ -209,6 +296,7 @@ private:
     {
         uint64_t frame;
         uint32_t perms;
+        bool cow = false;
     };
     struct Huge
     {
@@ -258,6 +346,7 @@ private:
     std::map<uint64_t, Pte> m_pages;  /* page index -> 4KB PTE  */
     std::map<uint64_t, Huge> m_huge;  /* window index -> 2MB leaf */
     DaemonStats m_dstats;
+    CowStats m_cstats;
 };
 
 } // namespace vtsa_test

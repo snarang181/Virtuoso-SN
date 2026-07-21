@@ -41,6 +41,12 @@ namespace ParametricDramDirectoryMSI
 
     class MemoryManagementUnitBase
     {
+    public:
+        // V-TSA: memory_manager stashes the current access type here so the
+        // miss path can distinguish writes (COW-fault emulation).
+        bool m_vtsa_access_is_write = false;
+        void setVtsaAccessIsWrite(bool w) { m_vtsa_access_is_write = w; }
+
 
     protected:
 

@@ -23,11 +23,10 @@
  *        itself mapped; a hit reports exactly the descriptor's own
  *        base/size.
  *
- * Phase 1 port scope (docs/virtuoso-port-plan.md in the v-tsa repo):
- * fork/COW ops are STUBBED (Virtuoso has no fork/CoW until Phase 5); the
- * fuzz keeps the op slot but substitutes a guarded touch, and the final
- * assertions check forks == 0 instead of forks > 0.  Everything else is
- * a faithful translation.
+ * Phase 5 port scope: fork/COW runs via the emulated single-space model
+ * (fork_mark = demote + RO+COW marking + refcounts + revoke-all; COW
+ * write = copy/reuse + revoke) - the cow.c semantics without a simulated
+ * child, matching the Virtuoso port design.
  */
 #include "fake_vspace.h"
 
@@ -103,7 +102,7 @@ static void touch_write(FakeVspace *vs, uint64_t page)
     CHECK(vs->touch(page, true));
 }
 
-static void touch_read(FakeVspace *vs, uint64_t page)
+__attribute__((unused)) static void touch_read(FakeVspace *vs, uint64_t page)
 {
     CHECK(vs->touch(page, false));
 }
@@ -362,8 +361,14 @@ static void test_fuzz()
                 CHECK(g_vs->demote(g_vs->first_huge_va()) == 0);
                 c.demotes++;
             }
-        } else if (op < 92) { /* fork / COW write - STUBBED until Phase 5 */
-            fuzz_touch(g_vs, sm64(&rng) % REGION_PAGES, 1, &c);
+        } else if (op < 92) { /* fork_mark / COW write */
+            if (c.forks == 0 || sm64(&rng) % 8 == 0) {
+                g_vs->fork_mark();
+                c.forks++;
+            } else {
+                /* force a write - COW pages resolve via copy/reuse */
+                fuzz_touch(g_vs, sm64(&rng) % REGION_PAGES, 1, &c);
+            }
         } else { /* check consistency */
             (void)sm64(&rng);
             uint64_t page = sm64(&rng) % REGION_PAGES;
@@ -406,12 +411,18 @@ static void test_fuzz()
     CHECK(c.publishes_ok > 50); /* the fuzz exercised the model */
     CHECK(c.publishes_refused > 0);
     CHECK(c.invariant_checks > 1000);
-    CHECK(c.forks == 0); /* Phase 1 scope: fork/COW arrive in Phase 5 */
+    CHECK(c.forks > 0); /* fork/COW exercised (emulated model) */
 
     std::printf("vtsa_p1_cert_fuzz_daemon: promotions=%" PRIu64
                 " demotions=%" PRIu64 "\n",
                 g_vs->daemon_stats().promotions,
                 g_vs->daemon_stats().demotions);
+    std::printf("vtsa_p5_cert_fuzz_cow: fork_marks=%" PRIu64
+                " pages_marked=%" PRIu64 " cow_faults=%" PRIu64
+                " copies=%" PRIu64 " reuses=%" PRIu64 "\n",
+                g_vs->cow_stats().fork_marks, g_vs->cow_stats().pages_marked,
+                g_vs->cow_stats().cow_faults, g_vs->cow_stats().cow_copies,
+                g_vs->cow_stats().cow_reuses);
 
     env_down();
 }

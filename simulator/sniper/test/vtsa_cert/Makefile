@@ -17,10 +17,15 @@ test_cert_rlb: test_cert_rlb.cc fake_vspace.h \
 	$(CXX) $(CXXFLAGS) -I$(CERT_DIR) test_cert_rlb.cc \
 		$(CERT_DIR)/cert_manager.cc -o $@
 
+test_adaptive_estimator: test_adaptive_estimator.cc \
+		$(CERT_DIR)/adaptive_cow_estimator.h
+	$(CXX) $(CXXFLAGS) -I$(CERT_DIR) test_adaptive_estimator.cc -o $@
+
 .PHONY: run clean
-run: test_cert_conformance test_cert_rlb
+run: test_cert_conformance test_cert_rlb test_adaptive_estimator
 	./test_cert_conformance
 	./test_cert_rlb
+	./test_adaptive_estimator
 
 clean:
-	rm -f test_cert_conformance test_cert_rlb
+	rm -f test_cert_conformance test_cert_rlb test_adaptive_estimator

@@ -53,6 +53,7 @@ enum HintMagicCmd : uint64_t
     kVtsaCmdRegionRegister   = 0x75A0, /* {u64 base, len, flags, site_id} */
     kVtsaCmdRegionUnregister = 0x75A1, /* {u64 base, len}                 */
     kVtsaCmdMprotect         = 0x75A2, /* {u64 base, len, perms}          */
+    kVtsaCmdForkMark         = 0x75A3, /* no descriptor: snapshot fork     */
 };
 
 struct HintRegion
