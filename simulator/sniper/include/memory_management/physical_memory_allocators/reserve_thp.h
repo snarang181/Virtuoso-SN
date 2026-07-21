@@ -1,4 +1,5 @@
 #pragma once
+#include <unordered_map>
 
 #include "debug_config.h"
 #include "memory_management/physical_memory_allocators/physical_memory_allocator.h"
@@ -83,9 +84,11 @@ public:
                             int max_order,
                             int kernel_size,
                             String frag_type,
-                            double threshold_for_promotion)
+                            double threshold_for_promotion,
+                            UInt64 scan_lag_faults = 0)
         : PhysicalMemoryAllocator(name, memory_size, kernel_size),
-          threshold_for_promotion(threshold_for_promotion)
+          threshold_for_promotion(threshold_for_promotion),
+          scan_lag_faults(scan_lag_faults)
     {
         Policy::on_init(name, memory_size, kernel_size, threshold_for_promotion, this);
 
@@ -122,6 +125,7 @@ public:
     {
         stats.total_allocations++;
         this->log("allocate: size=", size, "addr=", address, "core=", core_id);
+        fault_clock++;
 
         // Page table allocations always go to the buddy allocator in 4KB form
         if (is_pagetable_allocation)
@@ -334,6 +338,12 @@ protected:
     BuddyType* buddy_allocator;
     std::map<UInt64, std::tuple<UInt64, std::bitset<512>, bool>> two_mb_map;
     double threshold_for_promotion;
+    // V-TSA scan_lag: promotion executes only scan_lag_faults allocation
+    // events after the utilization threshold first trips (0 = immediate,
+    // huge = never). Models khugepaged scan lag on the fault clock.
+    UInt64 scan_lag_faults;
+    UInt64 fault_clock = 0;
+    std::unordered_map<UInt64, UInt64> promotion_eligible_since;
 
     /*
     * demote_page():
@@ -479,6 +489,21 @@ protected:
             this->log("Debug: Calculated utilization=", utilization, " threshold_for_promotion=", threshold_for_promotion);
             // If utilization exceeds the threshold, we "promote" the entire region as a huge page
             bool ready_to_promote = (utilization > threshold_for_promotion);
+            // V-TSA scan_lag: defer execution of an eligible promotion by
+            // scan_lag_faults allocation events (khugepaged-style lag).
+            if (ready_to_promote && scan_lag_faults > 0)
+            {
+                auto lag_it = promotion_eligible_since.find(region_2MB);
+                if (lag_it == promotion_eligible_since.end())
+                {
+                    promotion_eligible_since[region_2MB] = fault_clock;
+                    ready_to_promote = false;
+                }
+                else if (fault_clock - lag_it->second < scan_lag_faults)
+                {
+                    ready_to_promote = false;
+                }
+            }
             if (ready_to_promote && !std::get<2>(region))
             {
                 std::get<2>(region) = true;  // Mark as promoted

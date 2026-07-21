@@ -77,6 +77,17 @@ void SniperExceptionHandler::handle_page_fault(FaultCtx &ctx)
 
     // 2. Update PTs
     allocate_page_table_frames(ctx, ctx.vpn << BASE_PAGE_SHIFT, core_id, ppn, page_size, ctx.alloc_in.metadata_frames);
+
+    // V-TSA: a 2MB allocation result here is the promotion moment (the
+    // level-2 PTE just replaced the window's 4KB view) - a mutation.
+    // Revoke overlapping certificates and sweep dependent MMU state
+    // BEFORE the fault completes. No-op unless the VTSA layer is active.
+    if (page_size == 21 && Sim()->getMimicOS()->vtsaActive())
+    {
+        Thread *thread_promoter = Sim()->getCoreManager()->getCoreFromID(core_id)->getThread();
+        if (thread_promoter)
+            Sim()->getMimicOS()->vtsaPromotionEvent(thread_promoter->getAppId(), ctx.vpn << BASE_PAGE_SHIFT);
+    }
 #if DEBUG_EXCEPTION_HANDLER >= DEBUG_BASIC
     log_file << "[EXCEPTION_HANDLER] Page table frames allocated for address: " << (ctx.vpn << BASE_PAGE_SHIFT) <<
                 " -- allocated " << ctx.alloc_out.prealloc_frames.size() << " frames" << std::endl;

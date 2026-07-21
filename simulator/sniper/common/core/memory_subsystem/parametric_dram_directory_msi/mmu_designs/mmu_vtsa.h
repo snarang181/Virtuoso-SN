@@ -12,6 +12,7 @@
 #include "memory_management/certificates/cert_manager.h"
 #include "memory_management/certificates/cert_rlb.h"
 #include "memory_management/certificates/radix_address_space_view.h"
+#include "memory_management/certificates/mutation_listener.h"
 #include "metadata_table_base.h"
 #include "ptmshrs.h"
 #include "base_filter.h"
@@ -24,7 +25,7 @@ namespace ParametricDramDirectoryMSI
 	
 	class TLBHierarchy;
 
-	class MemoryManagementUnitVTSA : public MemoryManagementUnitBase
+	class MemoryManagementUnitVTSA : public MemoryManagementUnitBase, public vtsa::MutationSweepListener
 	{
 
 	private:
@@ -189,9 +190,12 @@ namespace ParametricDramDirectoryMSI
 			UInt64 refuse_align;
 			UInt64 refuse_contig;
 			UInt64 refuse_geometry;
+			UInt64 sweeps;
+			UInt64 tlb_shootdowns;
 		} vtsa_stats;
 		void registerVTSAStats();
 		bool vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);
+		void vtsaSweep(const vtsa::AddressSpaceView *as, uint64_t va, uint64_t bytes, bool unmap) override;
 
 	public:
 		MemoryManagementUnitVTSA(Core *core, MemoryManagerBase *memory_manager, ShmemPerfModel *shmem_perf_model, String name, MemoryManagementUnitBase *nested_mmu);

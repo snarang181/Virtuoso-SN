@@ -145,6 +145,8 @@ namespace ParametricDramDirectoryMSI
 			m_vtsa_pte_probe_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/pte_probe_cycles"));
 			memset(&vtsa_stats, 0, sizeof(vtsa_stats));
 			registerVTSAStats();
+			if (m_vtsa_mode != VTSA_MODE_OFF)
+				Sim()->getMimicOS()->vtsaRegisterSweepListener(this);
 		}
         std::cout << std::endl;
     }
@@ -1671,6 +1673,8 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_refuse_align", &vtsa_stats.refuse_align);
 		registerStatsMetric(name, core->getId(), "vtsa_refuse_contig", &vtsa_stats.refuse_contig);
 		registerStatsMetric(name, core->getId(), "vtsa_refuse_geometry", &vtsa_stats.refuse_geometry);
+		registerStatsMetric(name, core->getId(), "vtsa_sweeps", &vtsa_stats.sweeps);
+		registerStatsMetric(name, core->getId(), "vtsa_tlb_shootdowns", &vtsa_stats.tlb_shootdowns);
 	}
 
 	/* The V-TSA miss-path consult.  Page-table authority is preserved: this
@@ -1816,5 +1820,47 @@ namespace ParametricDramDirectoryMSI
 		return false;
 	}
 
+
+
+	/* The MMU half of SweepMutatedPage: on any mutation of [va, va+bytes),
+	 * drop dependent certificate-RLB entries and shoot down every coalesced
+	 * TLB entry that could cover the range; unmap additionally shoots down
+	 * the 4KB entries (their pages are gone, not merely re-described).
+	 * Promotion does not require 4KB shootdown here: ReserveTHP promotion
+	 * is a PTE rewrite with natural-offset placement, so surviving 4KB
+	 * entries still translate to the same frames. */
+	void MemoryManagementUnitVTSA::vtsaSweep(const vtsa::AddressSpaceView *as, uint64_t va, uint64_t bytes, bool unmap)
+	{
+		vtsa_stats.sweeps++;
+		m_vtsa_rlb->invalidate_overlap(as, va, bytes);
+
+		static const int kSweepBitsCoalesced[4] = {14, 16, 18, 21};
+		const TLBSubsystem &levels = tlb_subsystem->getTLBSubsystem();
+		for (UInt32 i = 0; i < levels.size(); i++)
+		{
+			for (UInt32 j = 0; j < levels[i].size(); j++)
+			{
+				TLB *tlb = levels[i][j];
+				for (int gi = 0; gi < 4; gi++)
+				{
+					int bits = kSweepBitsCoalesced[gi];
+					if (!tlb->supportsPageSize(bits))
+						continue;
+					uint64_t size = 1ull << bits;
+					uint64_t start = va & ~(size - 1);
+					for (uint64_t a = start; a < va + bytes; a += size)
+						if (tlb->invalidate((IntPtr)a, bits))
+							vtsa_stats.tlb_shootdowns++;
+				}
+				if (unmap && tlb->supportsPageSize(12))
+				{
+					uint64_t start = va & ~((uint64_t)4095);
+					for (uint64_t a = start; a < va + bytes; a += 4096)
+						if (tlb->invalidate((IntPtr)a, 12))
+							vtsa_stats.tlb_shootdowns++;
+				}
+			}
+		}
+	}
 
 } // namespace ParametricDramDirectoryMSI

@@ -13,6 +13,7 @@
 #include "fixed_types.h"
 #include "certificates/cert_manager.h"
 #include "certificates/radix_address_space_view.h"
+#include "certificates/mutation_listener.h"
 
 #include <unordered_map>
 #include <memory>
@@ -221,6 +222,63 @@ public:
         auto *raw = view.get();
         m_vtsa_views[app_id] = std::move(view);
         return raw;
+    }
+
+    // V-TSA mutation entry points.  Contract: revoke overlapping certs
+    // BEFORE the operation is visible, then sweep dependent TLB/RLB state
+    // on every registered MMU.  No-ops until the VTSA layer is in use.
+
+    void vtsaRegisterSweepListener(vtsa::MutationSweepListener *l)
+    {
+        m_vtsa_sweep_listeners.push_back(l);
+    }
+
+    bool vtsaActive() const { return m_vtsa_cert_manager != nullptr; }
+
+    void vtsaMutation(int app_id, IntPtr va, UInt64 bytes, bool unmap_op)
+    {
+        if (!vtsaActive())
+            return;
+        vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
+        if (!view)
+            return;
+        m_vtsa_cert_manager->on_mutation(view, (uint64_t)va, bytes);
+        for (auto *l : m_vtsa_sweep_listeners)
+            l->vtsaSweep(view, (uint64_t)va, bytes, unmap_op);
+    }
+
+    // Promotion of the 2MB window containing va (PTE rewrite): a mutation.
+    void vtsaPromotionEvent(int app_id, IntPtr va)
+    {
+        vtsaMutation(app_id, va & ~((IntPtr)vtsa::kHugeSize - 1),
+                     vtsa::kHugeSize, false);
+    }
+
+    // munmap delivery (Phase 4 magic ops): drop PTEs, then revoke + sweep
+    // with 4KB shootdown.
+    void vtsaMunmap(int app_id, IntPtr va, UInt64 bytes)
+    {
+        ParametricDramDirectoryMSI::PageTable *pt = getPageTable(app_id);
+        vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
+        if (pt)
+            for (UInt64 off = 0; off < bytes; off += vtsa::kPageSize)
+                pt->deletePage(va + off);
+        if (view)
+            for (UInt64 off = 0; off < bytes; off += vtsa::kPageSize)
+                view->clear_perms(((uint64_t)va + off) >> vtsa::kPageShift);
+        vtsaMutation(app_id, va, bytes, true);
+    }
+
+    // mprotect delivery (Phase 4 magic ops): update the perms overlay,
+    // then revoke + sweep (perm change is a mutation - the contract).
+    void vtsaMprotect(int app_id, IntPtr va, UInt64 bytes, uint32_t perms)
+    {
+        vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
+        if (view)
+            for (UInt64 off = 0; off < bytes; off += vtsa::kPageSize)
+                view->set_perms(((uint64_t)va + off) >> vtsa::kPageShift,
+                                perms);
+        vtsaMutation(app_id, va, bytes, false);
     }
 
     // ============ Memory Allocator ============
@@ -458,6 +516,7 @@ private:
     // ============ V-TSA State ============
     std::unique_ptr<vtsa::CertificateManager> m_vtsa_cert_manager;
     std::unordered_map<int, std::unique_ptr<vtsa::RadixAddressSpaceView>> m_vtsa_views;
+    std::vector<vtsa::MutationSweepListener*> m_vtsa_sweep_listeners;
     
     // ============ Page Fault State (per-core) ============
     std::vector<PageFaultState> m_pf_states;

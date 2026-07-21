@@ -97,7 +97,8 @@ public:
             String frag_type = Sim()->getCfg()->getString("perf_model/" + allocator_name + "/frag_type");
             int max_order = Sim()->getCfg()->getInt("perf_model/" + allocator_name + "/max_order");
             float threshold_for_promotion = Sim()->getCfg()->getFloat("perf_model/" + allocator_name + "/threshold_for_promotion");
-            return new SniperReserveTHPAllocator(allocator_type, memory_size, max_order, kernel_size, frag_type, threshold_for_promotion);
+            UInt64 scan_lag_faults = Sim()->getCfg()->getInt("perf_model/" + allocator_name + "/scan_lag_faults");
+            return new SniperReserveTHPAllocator(allocator_type, memory_size, max_order, kernel_size, frag_type, threshold_for_promotion, scan_lag_faults);
         }
         else if (allocator_type == "baseline")
         {
