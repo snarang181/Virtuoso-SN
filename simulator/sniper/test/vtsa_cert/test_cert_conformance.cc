@@ -330,8 +330,8 @@ static void test_fuzz()
                 CHECK(id == -EINVAL || id == -ENOSPC);
                 c.publishes_refused++;
             }
-        } else if (op < 58) { /* revoke */
-            if (g_cm->revoke((int64_t)(sm64(&rng) % kCertMax)) == 0)
+        } else if (op < 58) { /* revoke (draw low slots: first-filled) */
+            if (g_cm->revoke((int64_t)(sm64(&rng) % 256)) == 0)
                 c.revokes_ok++;
         } else if (op < 70) { /* unmap subrange */
             (void)sm64(&rng);

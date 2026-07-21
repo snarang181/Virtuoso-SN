@@ -175,6 +175,7 @@ namespace ParametricDramDirectoryMSI
 		ComponentLatency *m_vtsa_cow_fault_latency;
 		ComponentLatency *m_vtsa_cow_copy_latency;
 		std::unordered_map<IntPtr, bool> m_vtsa_hint_verdict_cache;
+		bool m_vtsa_cert_table_full = false;  // ENOSPC backoff until a revocation frees a slot
 		std::unordered_map<IntPtr, UInt64> m_vtsa_window_misses;
 		struct {
 			UInt64 certifications;
@@ -204,6 +205,7 @@ namespace ParametricDramDirectoryMSI
 			UInt64 cow_read_suppressed;
 			UInt64 adaptive_certifies;
 			UInt64 adaptive_refusals;
+			UInt64 certify_backoff;
 		} vtsa_stats;
 		void registerVTSAStats();
 		bool vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);

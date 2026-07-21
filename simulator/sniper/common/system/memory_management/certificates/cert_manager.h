@@ -53,7 +53,11 @@
 namespace vtsa
 {
 
-constexpr int64_t kCertMax = 256;
+/* Port delta (recorded): ukern used 256 slots for few, large,
+ * region-granularity certificates; the Virtuoso port certifies per
+ * gran-window, so large working sets need a bigger table. Slot reuse
+ * and version continuity are unchanged. */
+constexpr int64_t kCertMax = 4096;
 
 struct CertStatus
 {

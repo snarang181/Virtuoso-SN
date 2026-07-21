@@ -44,6 +44,7 @@
 
 // === Core MMU Headers ===
 #include "mmu_vtsa.h"
+#include <cerrno>
 #include "mmu_base.h"
 #include "memory_manager.h"
 #include "cache_cntlr.h"
@@ -1737,6 +1738,7 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_cow_read_suppressed", &vtsa_stats.cow_read_suppressed);
 		registerStatsMetric(name, core->getId(), "vtsa_adaptive_certifies", &vtsa_stats.adaptive_certifies);
 		registerStatsMetric(name, core->getId(), "vtsa_adaptive_refusals", &vtsa_stats.adaptive_refusals);
+		registerStatsMetric(name, core->getId(), "vtsa_certify_backoff", &vtsa_stats.certify_backoff);
 	}
 
 	/* The V-TSA miss-path consult.  Page-table authority is preserved: this
@@ -1928,6 +1930,13 @@ namespace ParametricDramDirectoryMSI
 		}
 
 		// no cert: blind miss-count heuristic per 2MB window
+		if (m_vtsa_cert_table_full)
+		{
+			// ENOSPC backoff: the OS stops certifying while the table is
+			// full; the next revocation (sweep) lifts the backoff.
+			if (count) vtsa_stats.certify_backoff++;
+			return false;
+		}
 		UInt64 &window_misses = m_vtsa_window_misses[address >> 21];
 		if (count)
 			window_misses++;
@@ -1948,6 +1957,11 @@ namespace ParametricDramDirectoryMSI
 			if (rc != 0)
 				continue;
 			int64_t id = mgr->publish(view, base, gran, gran);
+			if (id == -ENOSPC)
+			{
+				m_vtsa_cert_table_full = true;
+				return false;
+			}
 			if (id < 0)
 				continue;
 			if (count) vtsa_stats.certifications++;
@@ -1977,6 +1991,7 @@ namespace ParametricDramDirectoryMSI
 	void MemoryManagementUnitVTSA::vtsaSweep(const vtsa::AddressSpaceView *as, uint64_t va, uint64_t bytes, bool unmap)
 	{
 		vtsa_stats.sweeps++;
+		m_vtsa_cert_table_full = false; /* revocation frees slots */
 		m_vtsa_rlb->invalidate_overlap(as, va, bytes);
 		for (uint64_t w = va >> 21; w <= (va + bytes - 1) >> 21; w++)
 			m_vtsa_hint_verdict_cache.erase((IntPtr)w);
