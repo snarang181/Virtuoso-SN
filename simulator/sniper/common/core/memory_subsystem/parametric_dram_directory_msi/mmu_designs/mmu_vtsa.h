@@ -163,7 +163,7 @@ namespace ParametricDramDirectoryMSI
 		
 
 		// ================= V-TSA certification layer =================
-		enum VtsaMode { VTSA_MODE_OFF = 0, VTSA_MODE_HARDWARE_K, VTSA_MODE_AUTO_CERTIFY };
+		enum VtsaMode { VTSA_MODE_OFF = 0, VTSA_MODE_HARDWARE_K, VTSA_MODE_AUTO_CERTIFY, VTSA_MODE_CERTIFIED };
 		VtsaMode m_vtsa_mode;
 		UInt64 m_vtsa_k_budget;            // extra-PTE probe budget (bounded baseline)
 		UInt64 m_vtsa_miss_threshold;      // misses per 2MB window before auto-certify
@@ -171,6 +171,8 @@ namespace ParametricDramDirectoryMSI
 		ComponentLatency *m_vtsa_cert_check_latency;
 		ComponentLatency *m_vtsa_rlb_miss_latency;
 		ComponentLatency *m_vtsa_pte_probe_latency;
+		ComponentLatency *m_vtsa_metadata_latency;
+		std::unordered_map<IntPtr, bool> m_vtsa_hint_verdict_cache;
 		std::unordered_map<IntPtr, UInt64> m_vtsa_window_misses;
 		struct {
 			UInt64 certifications;
@@ -192,6 +194,9 @@ namespace ParametricDramDirectoryMSI
 			UInt64 refuse_geometry;
 			UInt64 sweeps;
 			UInt64 tlb_shootdowns;
+			UInt64 hint_qualified;
+			UInt64 hint_disqualified;
+			UInt64 hint_absent;
 		} vtsa_stats;
 		void registerVTSAStats();
 		bool vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);

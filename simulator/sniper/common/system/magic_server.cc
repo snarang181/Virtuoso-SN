@@ -249,6 +249,36 @@ UInt64 MagicServer::Magic_unlocked(thread_id_t thread_id, core_id_t core_id, UIn
    }
    case SIM_CMD_USER:
    {
+      // V-TSA hint ops: arg0 = command, arg1 = pointer (in traced-app
+      // memory) to a packed descriptor read via accessMemory.
+      if (arg0 == vtsa::kVtsaCmdRegionRegister ||
+          arg0 == vtsa::kVtsaCmdRegionUnregister ||
+          arg0 == vtsa::kVtsaCmdMprotect)
+      {
+         UInt64 desc[4] = {0, 0, 0, 0};
+         Core *vtsa_core = Sim()->getCoreManager()->getCoreFromID(core_id);
+         vtsa_core->accessMemory(Core::NONE, Core::READ, arg1, (char*)desc, sizeof(desc), Core::MEM_MODELED_NONE);
+         Thread *vtsa_thread = vtsa_core->getThread();
+         int vtsa_app_id = vtsa_thread ? vtsa_thread->getAppId() : 0;
+         switch (arg0)
+         {
+         case vtsa::kVtsaCmdRegionRegister:
+         {
+            vtsa::HintRegion r;
+            r.base = desc[0]; r.len = desc[1];
+            r.flags = (uint32_t)desc[2]; r.site_id = desc[3];
+            Sim()->getMimicOS()->vtsaRegionRegister(vtsa_app_id, r);
+            break;
+         }
+         case vtsa::kVtsaCmdRegionUnregister:
+            Sim()->getMimicOS()->vtsaRegionUnregister(vtsa_app_id, (IntPtr)desc[0], desc[1]);
+            break;
+         case vtsa::kVtsaCmdMprotect:
+            Sim()->getMimicOS()->vtsaMprotect(vtsa_app_id, (IntPtr)desc[0], desc[1], (uint32_t)desc[2]);
+            break;
+         }
+         return 0;
+      }
       MagicMarkerType args = {thread_id : thread_id, core_id : core_id, arg0 : arg0, arg1 : arg1, str : NULL};
       return Sim()->getHooksManager()->callHooks(HookType::HOOK_MAGIC_USER, (UInt64)&args, true /* expect return value */);
    }

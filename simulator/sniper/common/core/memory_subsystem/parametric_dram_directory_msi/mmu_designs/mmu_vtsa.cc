@@ -135,6 +135,7 @@ namespace ParametricDramDirectoryMSI
 			String vtsa_mode = Sim()->getCfg()->getString("perf_model/" + name + "/vtsa/mode");
 			if (vtsa_mode == "hardware_k") m_vtsa_mode = VTSA_MODE_HARDWARE_K;
 			else if (vtsa_mode == "off") m_vtsa_mode = VTSA_MODE_OFF;
+			else if (vtsa_mode == "certified") m_vtsa_mode = VTSA_MODE_CERTIFIED;
 			else m_vtsa_mode = VTSA_MODE_AUTO_CERTIFY;
 			m_vtsa_k_budget = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/k_budget");
 			m_vtsa_miss_threshold = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/miss_threshold");
@@ -143,6 +144,7 @@ namespace ParametricDramDirectoryMSI
 			m_vtsa_cert_check_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cert_check_cycles"));
 			m_vtsa_rlb_miss_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/rlb_miss_cycles"));
 			m_vtsa_pte_probe_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/pte_probe_cycles"));
+			m_vtsa_metadata_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/metadata_lookup_cycles"));
 			memset(&vtsa_stats, 0, sizeof(vtsa_stats));
 			registerVTSAStats();
 			if (m_vtsa_mode != VTSA_MODE_OFF)
@@ -1675,6 +1677,9 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_refuse_geometry", &vtsa_stats.refuse_geometry);
 		registerStatsMetric(name, core->getId(), "vtsa_sweeps", &vtsa_stats.sweeps);
 		registerStatsMetric(name, core->getId(), "vtsa_tlb_shootdowns", &vtsa_stats.tlb_shootdowns);
+		registerStatsMetric(name, core->getId(), "vtsa_hint_qualified", &vtsa_stats.hint_qualified);
+		registerStatsMetric(name, core->getId(), "vtsa_hint_disqualified", &vtsa_stats.hint_disqualified);
+		registerStatsMetric(name, core->getId(), "vtsa_hint_absent", &vtsa_stats.hint_absent);
 	}
 
 	/* The V-TSA miss-path consult.  Page-table authority is preserved: this
@@ -1782,6 +1787,45 @@ namespace ParametricDramDirectoryMSI
 			return false;
 		}
 
+		// certified (hint-gated) mode: the metadata gate decides whether
+		// this window may certify at all. Verdict cached per 2MB window;
+		// the metadata lookup + region check is charged once per window
+		// epoch (tlb_sim.py constants). Disqualified/hint-less windows
+		// fall back to nothing (bounded reach comes from the baseline
+		// scheme, compared on identical state).
+		if (m_vtsa_mode == VTSA_MODE_CERTIFIED)
+		{
+			IntPtr hint_window = address >> 21;
+			auto hv = m_vtsa_hint_verdict_cache.find(hint_window);
+			bool qualified;
+			if (hv != m_vtsa_hint_verdict_cache.end())
+			{
+				qualified = hv->second;
+			}
+			else
+			{
+				extra_latency += m_vtsa_metadata_latency->getLatency();
+				vtsa::HintRegion hr;
+				if (!Sim()->getMimicOS()->vtsaHintFor(app_id, (uint64_t)address, &hr))
+				{
+					if (count) vtsa_stats.hint_absent++;
+					qualified = false;
+				}
+				else
+				{
+					qualified = vtsa::hint_qualifies(hr.flags);
+					if (count)
+					{
+						if (qualified) vtsa_stats.hint_qualified++;
+						else vtsa_stats.hint_disqualified++;
+					}
+				}
+				m_vtsa_hint_verdict_cache[hint_window] = qualified;
+			}
+			if (!qualified)
+				return false;
+		}
+
 		// no cert: blind miss-count heuristic per 2MB window
 		UInt64 &window_misses = m_vtsa_window_misses[address >> 21];
 		if (count)
@@ -1833,6 +1877,8 @@ namespace ParametricDramDirectoryMSI
 	{
 		vtsa_stats.sweeps++;
 		m_vtsa_rlb->invalidate_overlap(as, va, bytes);
+		for (uint64_t w = va >> 21; w <= (va + bytes - 1) >> 21; w++)
+			m_vtsa_hint_verdict_cache.erase((IntPtr)w);
 
 		static const int kSweepBitsCoalesced[4] = {14, 16, 18, 21};
 		const TLBSubsystem &levels = tlb_subsystem->getTLBSubsystem();

@@ -14,6 +14,7 @@
 #include "certificates/cert_manager.h"
 #include "certificates/radix_address_space_view.h"
 #include "certificates/mutation_listener.h"
+#include "certificates/hint_flags.h"
 
 #include <unordered_map>
 #include <memory>
@@ -281,6 +282,47 @@ public:
         vtsaMutation(app_id, va, bytes, false);
     }
 
+    // V-TSA compiler-hint region registry (delivered by magic ops from
+    // the traced binary's hint runtime; consumed by the hint-gated MMU
+    // policy).  Registration is bookkeeping, not a mutation; UNregister
+    // is munmap semantics and routes through vtsaMunmap.
+
+    void vtsaRegionRegister(int app_id, const vtsa::HintRegion &r)
+    {
+        m_vtsa_hint_regions[app_id].push_back(r);
+        m_vtsa_hint_registered++;
+    }
+
+    void vtsaRegionUnregister(int app_id, IntPtr base, UInt64 len)
+    {
+        auto it = m_vtsa_hint_regions.find(app_id);
+        if (it != m_vtsa_hint_regions.end())
+            for (size_t i = 0; i < it->second.size();)
+                if (it->second[i].base == (uint64_t)base &&
+                    it->second[i].len == len)
+                    it->second.erase(it->second.begin() + i);
+                else
+                    i++;
+        vtsaMunmap(app_id, base, len);
+    }
+
+    /* Hint lookup for va: true iff a registered region covers it. */
+    bool vtsaHintFor(int app_id, uint64_t va, vtsa::HintRegion *out) const
+    {
+        auto it = m_vtsa_hint_regions.find(app_id);
+        if (it == m_vtsa_hint_regions.end())
+            return false;
+        for (const auto &r : it->second)
+            if (va >= r.base && va < r.base + r.len) {
+                if (out)
+                    *out = r;
+                return true;
+            }
+        return false;
+    }
+
+    UInt64 vtsaHintRegisteredCount() const { return m_vtsa_hint_registered; }
+
     // ============ Memory Allocator ============
 
     PhysicalMemoryAllocator* getMemoryAllocator() { return m_memory_allocator.get(); }
@@ -517,6 +559,8 @@ private:
     std::unique_ptr<vtsa::CertificateManager> m_vtsa_cert_manager;
     std::unordered_map<int, std::unique_ptr<vtsa::RadixAddressSpaceView>> m_vtsa_views;
     std::vector<vtsa::MutationSweepListener*> m_vtsa_sweep_listeners;
+    std::unordered_map<int, std::vector<vtsa::HintRegion>> m_vtsa_hint_regions;
+    UInt64 m_vtsa_hint_registered = 0;
     
     // ============ Page Fault State (per-core) ============
     std::vector<PageFaultState> m_pf_states;
