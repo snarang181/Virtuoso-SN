@@ -59,6 +59,7 @@ namespace ParametricDramDirectoryMSI
 		PageTableRadix(int core_id, String name, String type, int page_sizes, int *page_size_list, int levels, int frame_size, bool is_guest = false);
 		~PageTableRadix();
 		PTWResult initializeWalk(IntPtr address, bool count, bool is_prefetch = false, bool restart_walk = false);
+		bool functionalLookup(IntPtr address, IntPtr *ppn, int *page_size) override;
 		int updatePageTableFrames(IntPtr address, IntPtr core_id, IntPtr ppn, int page_size, std::vector<UInt64> frames);
 		void deletePage(IntPtr address);
 		IntPtr getPhysicalSpace(int size);

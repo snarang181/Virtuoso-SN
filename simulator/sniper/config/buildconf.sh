@@ -2,7 +2,7 @@
 
 if [ -z "${SNIPER_ROOT}" ] ; then SNIPER_ROOT=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")/..") ; fi
 
-DR_HOME="/mnt/panzer/kanellok/virtuoso_artifact/simulator/sniper/dynamorio/build"
+DR_HOME="/localhome/local-sanarang/Virtuoso/simulator/sniper/dynamorio/build"
 GRAPHITE_CC="cc"
 GRAPHITE_CFLAGS="-mno-sse4 -mno-sse4.1 -mno-sse4.2 -mno-sse4a -mno-avx -mno-avx2 -I${SNIPER_ROOT}/include "
 GRAPHITE_CXX="g++"
@@ -11,7 +11,7 @@ GRAPHITE_LD="g++"
 GRAPHITE_LDFLAGS="-static -L${SNIPER_ROOT}/lib -pthread "
 GRAPHITE_LD_LIBRARY_PATH=""
 GRAPHITE_UPCCFLAGS="-I${SNIPER_ROOT}/include  -link-with='g++ -static -L${SNIPER_ROOT}/lib -pthread'"
-PIN_HOME="/mnt/panzer/kanellok/virtuoso_artifact/simulator/sniper/sde_kit/pinkit"
+PIN_HOME="/localhome/local-sanarang/Virtuoso/simulator/sniper/sde_kit/pinkit"
 SNIPER_CC="cc"
 SNIPER_CFLAGS="-mno-sse4 -mno-sse4.1 -mno-sse4.2 -mno-sse4a -mno-avx -mno-avx2 -I${SNIPER_ROOT}/include "
 SNIPER_CXX="g++"

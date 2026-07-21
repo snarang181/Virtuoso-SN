@@ -128,6 +128,15 @@ namespace ParametricDramDirectoryMSI
 		};
 
 		virtual PTWResult initializeWalk(IntPtr address, bool count, bool is_prefetch = false, bool restart_walk = false) = 0;
+
+		// V-TSA: functional (side-effect-free) lookup - no stats, no faults,
+		// no latency. Returns true and fills ppn/page_size only for a valid
+		// present leaf. Used by the certificate manager's validation walks.
+		virtual bool functionalLookup(IntPtr address, IntPtr *ppn, int *page_size)
+		{
+			(void)address; (void)ppn; (void)page_size;
+			return false;
+		}
 		int *getPageSizes() { return m_page_size_list; };
 		int getPageSizesCount() { return m_page_sizes; };
 		virtual int getMaxLevel() { return -1; }; // This function should be overriden by the derived class (e.g., in RadixPageTable there are maximum 4 levels)

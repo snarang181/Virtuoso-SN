@@ -260,6 +260,31 @@ namespace ParametricDramDirectoryMSI
                 return PTWResult(page_size_result, visited_pts, ppn_result, pwc_latency, is_pagefault, 0);
         }
 
+        /* V-TSA: functional lookup - walks the radix tree with NO stats, NO
+         * fault handling, NO latency. True only for a valid present leaf. */
+        bool PageTableRadix::functionalLookup(IntPtr address, IntPtr *ppn, int *page_size)
+        {
+                PTFrame *current_frame = root;
+                int level = levels;
+                while (level > 0)
+                {
+                        IntPtr offset = (address >> (48 - 9 * (levels - level + 1))) & 0x1FF;
+                        if (current_frame->entries[offset].is_pte)
+                        {
+                                if (!current_frame->entries[offset].data.translation.valid)
+                                        return false;
+                                *ppn = current_frame->entries[offset].data.translation.ppn;
+                                *page_size = m_page_size_list[level - 1];
+                                return true;
+                        }
+                        if (current_frame->entries[offset].data.next_level == NULL)
+                                return false;
+                        current_frame = current_frame->entries[offset].data.next_level;
+                        level--;
+                }
+                return false;
+        }
+
         int PageTableRadix::updatePageTableFrames(IntPtr address, IntPtr core_id, IntPtr ppn, int page_size, std::vector<UInt64> frames)
         {
              m_log->detailed("I was provided with the following frames: ");

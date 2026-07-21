@@ -11,9 +11,16 @@ test_cert_conformance: test_cert_conformance.cc fake_vspace.h \
 	$(CXX) $(CXXFLAGS) -I$(CERT_DIR) test_cert_conformance.cc \
 		$(CERT_DIR)/cert_manager.cc -o $@
 
+test_cert_rlb: test_cert_rlb.cc fake_vspace.h \
+		$(CERT_DIR)/cert_manager.cc $(CERT_DIR)/cert_manager.h \
+		$(CERT_DIR)/cert_rlb.h $(CERT_DIR)/address_space_view.h
+	$(CXX) $(CXXFLAGS) -I$(CERT_DIR) test_cert_rlb.cc \
+		$(CERT_DIR)/cert_manager.cc -o $@
+
 .PHONY: run clean
-run: test_cert_conformance
+run: test_cert_conformance test_cert_rlb
 	./test_cert_conformance
+	./test_cert_rlb
 
 clean:
-	rm -f test_cert_conformance
+	rm -f test_cert_conformance test_cert_rlb

@@ -75,11 +75,14 @@ void CertificateManager::log_check_miss(uint64_t va)
  * whose frames form such a run).                                          */
 int CertificateManager::validate_range(const AddressSpaceView *as,
                                        uint64_t va, uint64_t bytes,
-                                       uint64_t gran, const char **why)
+                                       uint64_t gran, const char **why,
+                                       uint64_t *pages_checked)
 {
     *why = "ok";
-    if (!as || bytes == 0 || (gran != kPageSize && gran != kHugeSize) ||
-        (va % gran) != 0 || (bytes % gran) != 0) {
+    if (pages_checked)
+        *pages_checked = 0;
+    if (!as || bytes == 0 || !gran_allowed(gran) || (va % gran) != 0 ||
+        (bytes % gran) != 0) {
         *why = "bad_geometry";
         return -EINVAL;
     }
@@ -87,11 +90,14 @@ int CertificateManager::validate_range(const AddressSpaceView *as,
         *why = "out_of_bounds";              /* DescriptorRangeInBounds */
         return -EINVAL;
     }
+    const uint64_t gran_frames = gran >> kPageShift;
     uint32_t perms0 = 0;
     bool have_perms0 = false;
     uint64_t win_base_frame = 0;
     PageInfo pi;
     for (uint64_t off = 0; off < bytes; off += kPageSize) {
+        if (pages_checked)
+            (*pages_checked)++;
         if (!as->translate(va + off, pi) || !pi.present) {
             *why = "page_absent";            /* hole => refuse           */
             return -EINVAL;
@@ -104,13 +110,14 @@ int CertificateManager::validate_range(const AddressSpaceView *as,
             *why = "perms_not_uniform";      /* perms = base.perms       */
             return -EINVAL;
         }
-        if (gran == kHugeSize) {
-            uint64_t widx = (off >> kPageShift) & (kHugeFrames - 1);
+        if (gran > kPageSize) {
+            uint64_t widx = (off >> kPageShift) & (gran_frames - 1);
             if (widx == 0) {
                 win_base_frame = pi.frame;
-                /* Window base must be 2MB-aligned physically.  A level-2
-                 * leaf guarantees this by construction.                  */
-                if (pi.level != 2 && (pi.frame % kHugeFrames) != 0) {
+                /* Window base must be gran-aligned physically.  A level-2
+                 * (2MB) leaf guarantees 2MB alignment by construction.   */
+                if (!(gran == kHugeSize && pi.level == 2) &&
+                    (pi.frame % gran_frames) != 0) {
                     *why = "window_not_aligned";
                     return -EINVAL;
                 }

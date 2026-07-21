@@ -11,6 +11,7 @@
 #include "mmu_spec.h"
 #include "mmu_utopia.h"
 #include "mmu_utopia_coalesce.h"
+#include "mmu_vtsa.h"
 #include "config.hpp"
 
 
@@ -57,6 +58,10 @@ namespace ParametricDramDirectoryMSI
 			else if (type == "utopia_coalesce")	// Utopia with coalesced 2MB radix walk
 			{
 				return new MemoryManagementUnitUtopiaCoalesce(core, memory_manager, shmem_perf_model, name, nested_mmu);
+			}
+			else if (type == "vtsa")	// V-TSA: verified certified-region TLB coalescing
+			{
+				return new MemoryManagementUnitVTSA(core, memory_manager, shmem_perf_model, name, nested_mmu);
 			}
 			else
 			{

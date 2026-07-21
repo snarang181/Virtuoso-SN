@@ -11,6 +11,8 @@
 #include "memory_management/policies/swap_cache_policy.h"
 #include "subsecond_time.h"
 #include "fixed_types.h"
+#include "certificates/cert_manager.h"
+#include "certificates/radix_address_space_view.h"
 
 #include <unordered_map>
 #include <memory>
@@ -192,8 +194,37 @@ public:
     int getSuccessfulOffsetBasedAllocations(int app_id, IntPtr va);
     int getVMAThresholdSpot(int app_id, IntPtr va);
     
+    // ============ V-TSA Certificate Manager ============
+    // OS-owned certificate table (the TLA-contract implementation) plus a
+    // per-application AddressSpaceView adapter over the app's page table.
+    // Lazily constructed on first use so non-VTSA configs pay nothing.
+
+    vtsa::CertificateManager* getVtsaCertManager()
+    {
+        if (!m_vtsa_cert_manager) {
+            m_vtsa_cert_manager.reset(new vtsa::CertificateManager());
+            m_vtsa_cert_manager->init(nullptr);
+        }
+        return m_vtsa_cert_manager.get();
+    }
+
+    vtsa::RadixAddressSpaceView* getVtsaView(int app_id)
+    {
+        auto it = m_vtsa_views.find(app_id);
+        if (it != m_vtsa_views.end())
+            return it->second.get();
+        ParametricDramDirectoryMSI::PageTable *pt = getPageTable(app_id);
+        if (!pt)
+            return nullptr;
+        auto view = std::unique_ptr<vtsa::RadixAddressSpaceView>(
+            new vtsa::RadixAddressSpaceView(pt, app_id));
+        auto *raw = view.get();
+        m_vtsa_views[app_id] = std::move(view);
+        return raw;
+    }
+
     // ============ Memory Allocator ============
-    
+
     PhysicalMemoryAllocator* getMemoryAllocator() { return m_memory_allocator.get(); }
 
     /**
@@ -423,6 +454,10 @@ private:
     
     // ============ Per-Application State ============
     std::unordered_map<int, std::unique_ptr<ApplicationContext>> m_applications;
+
+    // ============ V-TSA State ============
+    std::unique_ptr<vtsa::CertificateManager> m_vtsa_cert_manager;
+    std::unordered_map<int, std::unique_ptr<vtsa::RadixAddressSpaceView>> m_vtsa_views;
     
     // ============ Page Fault State (per-core) ============
     std::vector<PageFaultState> m_pf_states;

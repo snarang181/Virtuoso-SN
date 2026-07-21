@@ -108,10 +108,25 @@ public:
     uint64_t event_seq() const { return m_active ? m_seq : 0; }
 
     /* PagesValidateDescriptor, executable (see cert.c:validate_range).
-     * Exposed for the MMU-side granularity-fallback probe. */
+     * Exposed for the MMU-side granularity-fallback probe.
+     *
+     * Port delta vs ukern (recorded): gran accepts the full coalescing
+     * set {4KB, 16KB, 64KB, 256KB, 2MB} - the window contiguity/alignment
+     * checks generalize verbatim (gran_frames = gran/4KB); ukern's
+     * {4KB, 2MB} behavior is the unchanged subset, which the conformance
+     * suite pins.  pages_checked (optional) reports pages walked before
+     * success/refusal so callers can charge validation cost exactly. */
     static int validate_range(const AddressSpaceView *as, uint64_t va,
                               uint64_t bytes, uint64_t gran,
-                              const char **why);
+                              const char **why,
+                              uint64_t *pages_checked = nullptr);
+
+    static bool gran_allowed(uint64_t gran)
+    {
+        return gran == kPageSize || gran == (16ull << 10) ||
+               gran == (64ull << 10) || gran == (256ull << 10) ||
+               gran == kHugeSize;
+    }
 
 private:
     struct Cert
