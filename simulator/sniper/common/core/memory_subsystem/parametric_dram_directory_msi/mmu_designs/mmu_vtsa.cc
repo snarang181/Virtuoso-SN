@@ -1768,42 +1768,7 @@ namespace ParametricDramDirectoryMSI
 			return false;
 
 		if (m_vtsa_mode == VTSA_MODE_HARDWARE_K)
-		{
-			for (int gi = 0; gi < 4; gi++)
-			{
-				int bits = kGranBitsDesc[gi];
-				UInt64 size = 1ull << bits;
-				UInt64 pages = size >> 12;
-				if (pages - 1 > m_vtsa_k_budget)
-				{
-					if (count) vtsa_stats.bounded_skipped_budget++;
-					continue;
-				}
-				IntPtr base = address & ~((IntPtr)size - 1);
-				const char *why;
-				uint64_t checked = 0;
-				int rc = vtsa::CertificateManager::validate_range(view, base, size, size, &why, &checked);
-				if (count) vtsa_stats.probe_pte_reads += checked;
-				if (count && rc != 0) vtsaCountRefusal(why, &vtsa_stats.refuse_absent, &vtsa_stats.refuse_perms, &vtsa_stats.refuse_align, &vtsa_stats.refuse_contig, &vtsa_stats.refuse_geometry);
-				extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
-				if (rc == 0)
-				{
-					vtsa::PageInfo pi;
-					view->translate(base, pi);
-					out_bits = bits;
-					out_ppn = (IntPtr)pi.frame;
-					if (count)
-					{
-						if (bits == 14) vtsa_stats.bounded_installs_16k++;
-						else if (bits == 16) vtsa_stats.bounded_installs_64k++;
-						else if (bits == 18) vtsa_stats.bounded_installs_256k++;
-						else vtsa_stats.bounded_installs_2m++;
-					}
-					return true;
-				}
-			}
-			return false;
-		}
+			return vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
 
 		// ---- auto_certify ----
 		vtsa::CertRLB::Entry ent;
@@ -1855,13 +1820,24 @@ namespace ParametricDramDirectoryMSI
 		if (m_vtsa_mode == VTSA_MODE_ADAPTIVE)
 		{
 			// hint-gated like certified, except COW-marked regions consult
-			// the causal estimator instead of statically refusing.
+			// the causal estimator instead of statically refusing. Non-COW
+			// verdicts cache per window (metadata charged once per epoch,
+			// as in tlb_sim); refusals fall back to bounded probing.
+			IntPtr ad_window = address >> 21;
+			auto adv = m_vtsa_hint_verdict_cache.find(ad_window);
+			if (adv != m_vtsa_hint_verdict_cache.end())
+			{
+				if (!adv->second)
+					return vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
+				goto adaptive_gate_ok;
+			}
 			extra_latency += m_vtsa_metadata_latency->getLatency();
 			vtsa::HintRegion hr;
 			if (!Sim()->getMimicOS()->vtsaHintFor(app_id, (uint64_t)address, &hr))
 			{
 				if (count) vtsa_stats.hint_absent++;
-				return false;
+				m_vtsa_hint_verdict_cache[ad_window] = false;
+				return vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
 			}
 			bool gate_ok;
 			if (hr.flags & vtsa::kHintCowSensitive)
@@ -1893,8 +1869,14 @@ namespace ParametricDramDirectoryMSI
 					else vtsa_stats.hint_disqualified++;
 				}
 			}
+			if (!(hr.flags & vtsa::kHintCowSensitive))
+				m_vtsa_hint_verdict_cache[ad_window] = gate_ok;
 			if (!gate_ok)
-				return false;
+				return vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
+		}
+		if (m_vtsa_mode == VTSA_MODE_ADAPTIVE)
+		{
+adaptive_gate_ok:;
 		}
 		else if (m_vtsa_mode == VTSA_MODE_CERTIFIED)
 		{
@@ -1926,7 +1908,7 @@ namespace ParametricDramDirectoryMSI
 				m_vtsa_hint_verdict_cache[hint_window] = qualified;
 			}
 			if (!qualified)
-				return false;
+				return vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
 		}
 
 		// no cert: blind miss-count heuristic per 2MB window
@@ -2023,6 +2005,50 @@ namespace ParametricDramDirectoryMSI
 				}
 			}
 		}
+	}
+
+
+	/* Bounded largest-feasible probing (the k-budget hardware path).
+	 * Also the fallback for metadata-disqualified / hint-less windows in
+	 * the certified and adaptive modes - tlb_sim.py's disqualified
+	 * regions fell back to bounded best-fit, not to nothing. */
+	bool MemoryManagementUnitVTSA::vtsaBoundedProbe(vtsa::RadixAddressSpaceView *view, IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn)
+	{
+		static const int kGranBitsDesc[4] = {21, 18, 16, 14};
+		for (int gi = 0; gi < 4; gi++)
+		{
+			int bits = kGranBitsDesc[gi];
+			UInt64 size = 1ull << bits;
+			UInt64 pages = size >> 12;
+			if (pages - 1 > m_vtsa_k_budget)
+			{
+				if (count) vtsa_stats.bounded_skipped_budget++;
+				continue;
+			}
+			IntPtr base = address & ~((IntPtr)size - 1);
+			const char *why;
+			uint64_t checked = 0;
+			int rc = vtsa::CertificateManager::validate_range(view, base, size, size, &why, &checked);
+			if (count) vtsa_stats.probe_pte_reads += checked;
+			if (count && rc != 0) vtsaCountRefusal(why, &vtsa_stats.refuse_absent, &vtsa_stats.refuse_perms, &vtsa_stats.refuse_align, &vtsa_stats.refuse_contig, &vtsa_stats.refuse_geometry);
+			extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
+			if (rc == 0)
+			{
+				vtsa::PageInfo pi;
+				view->translate(base, pi);
+				out_bits = bits;
+				out_ppn = (IntPtr)pi.frame;
+				if (count)
+				{
+					if (bits == 14) vtsa_stats.bounded_installs_16k++;
+					else if (bits == 16) vtsa_stats.bounded_installs_64k++;
+					else if (bits == 18) vtsa_stats.bounded_installs_256k++;
+					else vtsa_stats.bounded_installs_2m++;
+				}
+				return true;
+			}
+		}
+		return false;
 	}
 
 } // namespace ParametricDramDirectoryMSI

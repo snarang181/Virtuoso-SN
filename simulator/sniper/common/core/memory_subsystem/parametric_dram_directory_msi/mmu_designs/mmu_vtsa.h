@@ -209,6 +209,7 @@ namespace ParametricDramDirectoryMSI
 		} vtsa_stats;
 		void registerVTSAStats();
 		bool vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);
+		bool vtsaBoundedProbe(vtsa::RadixAddressSpaceView *view, IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);
 		void vtsaSweep(const vtsa::AddressSpaceView *as, uint64_t va, uint64_t bytes, bool unmap) override;
 
 	public:
