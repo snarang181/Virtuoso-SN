@@ -21,11 +21,18 @@ test_adaptive_estimator: test_adaptive_estimator.cc \
 		$(CERT_DIR)/adaptive_cow_estimator.h
 	$(CXX) $(CXXFLAGS) -I$(CERT_DIR) test_adaptive_estimator.cc -o $@
 
+test_cert_upgrade: test_cert_upgrade.cc fake_vspace.h \
+		$(CERT_DIR)/cert_manager.cc $(CERT_DIR)/cert_manager.h \
+		$(CERT_DIR)/cert_rlb.h $(CERT_DIR)/address_space_view.h
+	$(CXX) $(CXXFLAGS) -I$(CERT_DIR) test_cert_upgrade.cc \
+		$(CERT_DIR)/cert_manager.cc -o $@
+
 .PHONY: run clean
-run: test_cert_conformance test_cert_rlb test_adaptive_estimator
+run: test_cert_conformance test_cert_rlb test_adaptive_estimator test_cert_upgrade
 	./test_cert_conformance
 	./test_cert_rlb
 	./test_adaptive_estimator
+	./test_cert_upgrade
 
 clean:
-	rm -f test_cert_conformance test_cert_rlb test_adaptive_estimator
+	rm -f test_cert_conformance test_cert_rlb test_adaptive_estimator test_cert_upgrade

@@ -167,6 +167,8 @@ namespace ParametricDramDirectoryMSI
 		VtsaMode m_vtsa_mode;
 		UInt64 m_vtsa_k_budget;            // extra-PTE probe budget (bounded baseline)
 		UInt64 m_vtsa_miss_threshold;      // misses per 2MB window before auto-certify
+		UInt64 m_vtsa_upgrade_interval;    // cert hits per 2MB window between upgrade probes (0 = disabled)
+		std::unordered_map<IntPtr, UInt64> m_vtsa_upgrade_hits;  // per-window hits since last probe
 		vtsa::CertRLB *m_vtsa_rlb;
 		ComponentLatency *m_vtsa_cert_check_latency;
 		ComponentLatency *m_vtsa_rlb_miss_latency;
@@ -206,10 +208,18 @@ namespace ParametricDramDirectoryMSI
 			UInt64 adaptive_certifies;
 			UInt64 adaptive_refusals;
 			UInt64 certify_backoff;
+			UInt64 upgrade_probes;
+			UInt64 upgrades;
+			UInt64 certs_gran_16k;
+			UInt64 certs_gran_64k;
+			UInt64 certs_gran_256k;
+			UInt64 certs_gran_2m;
 		} vtsa_stats;
 		void registerVTSAStats();
 		bool vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);
 		bool vtsaBoundedProbe(vtsa::RadixAddressSpaceView *view, IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);
+		bool vtsaTryUpgrade(vtsa::RadixAddressSpaceView *view, vtsa::CertificateManager *mgr, IntPtr address, vtsa::CertRLB::Entry &ent, bool count, SubsecondTime &extra_latency);
+		void vtsaCountCertGran(UInt64 gran);
 		void vtsaSweep(const vtsa::AddressSpaceView *as, uint64_t va, uint64_t bytes, bool unmap) override;
 
 	public:

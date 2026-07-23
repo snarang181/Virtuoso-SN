@@ -141,6 +141,7 @@ namespace ParametricDramDirectoryMSI
 			else m_vtsa_mode = VTSA_MODE_AUTO_CERTIFY;
 			m_vtsa_k_budget = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/k_budget");
 			m_vtsa_miss_threshold = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/miss_threshold");
+			m_vtsa_upgrade_interval = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/upgrade_probe_interval");
 			UInt64 rlb_entries = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/rlb_entries");
 			m_vtsa_rlb = new vtsa::CertRLB(rlb_entries);
 			m_vtsa_cert_check_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cert_check_cycles"));
@@ -1739,6 +1740,20 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_adaptive_certifies", &vtsa_stats.adaptive_certifies);
 		registerStatsMetric(name, core->getId(), "vtsa_adaptive_refusals", &vtsa_stats.adaptive_refusals);
 		registerStatsMetric(name, core->getId(), "vtsa_certify_backoff", &vtsa_stats.certify_backoff);
+		registerStatsMetric(name, core->getId(), "vtsa_upgrade_probes", &vtsa_stats.upgrade_probes);
+		registerStatsMetric(name, core->getId(), "vtsa_upgrades", &vtsa_stats.upgrades);
+		registerStatsMetric(name, core->getId(), "vtsa_certs_gran_16k", &vtsa_stats.certs_gran_16k);
+		registerStatsMetric(name, core->getId(), "vtsa_certs_gran_64k", &vtsa_stats.certs_gran_64k);
+		registerStatsMetric(name, core->getId(), "vtsa_certs_gran_256k", &vtsa_stats.certs_gran_256k);
+		registerStatsMetric(name, core->getId(), "vtsa_certs_gran_2m", &vtsa_stats.certs_gran_2m);
+	}
+
+	void MemoryManagementUnitVTSA::vtsaCountCertGran(UInt64 gran)
+	{
+		if (gran == (16ull << 10)) vtsa_stats.certs_gran_16k++;
+		else if (gran == (64ull << 10)) vtsa_stats.certs_gran_64k++;
+		else if (gran == (256ull << 10)) vtsa_stats.certs_gran_256k++;
+		else if (gran == (2ull << 20)) vtsa_stats.certs_gran_2m++;
 	}
 
 	/* The V-TSA miss-path consult.  Page-table authority is preserved: this
@@ -1794,6 +1809,18 @@ namespace ParametricDramDirectoryMSI
 		}
 		if (have_cert)
 		{
+			// Granularity-upgrade probe: a hit on a below-max certificate
+			// periodically re-validates the enclosing larger window (the
+			// mosaic left by mid-population certification caps TLB reach;
+			// see the citable-rows packet). Publish-first ordering keeps
+			// coverage intact on ENOSPC; subsumed certs are then revoked
+			// (version bump - stale RLB entries die on the version check;
+			// no TLB sweep needed since no frame moved).
+			if (m_vtsa_upgrade_interval > 0 && ent.gran < vtsa::kHugeSize &&
+			    vtsaTryUpgrade(view, mgr, address, ent, count, extra_latency))
+			{
+				/* ent now describes the upgraded certificate */
+			}
 			UInt64 gran = ent.gran;
 			IntPtr base = address & ~((IntPtr)gran - 1);
 			if ((uint64_t)base >= ent.va_base && (uint64_t)base + gran <= ent.va_base + ent.bytes)
@@ -1946,7 +1973,7 @@ adaptive_gate_ok:;
 			}
 			if (id < 0)
 				continue;
-			if (count) vtsa_stats.certifications++;
+			if (count) { vtsa_stats.certifications++; vtsaCountCertGran(gran); }
 			vtsa::CertStatus st;
 			mgr->get(id, &st);
 			m_vtsa_rlb->insert(view, st);
@@ -2047,6 +2074,68 @@ adaptive_gate_ok:;
 				}
 				return true;
 			}
+		}
+		return false;
+	}
+
+
+	/* Attempt to upgrade the certificate covering `address` to a larger
+	 * granularity.  Throttled per 2MB window (upgrade_probe_interval cert
+	 * hits between attempts).  Tries granularities above ent.gran,
+	 * largest first; validation charged per PTE read like any
+	 * certification.  On success: publish the large cert, retire the
+	 * subsumed smaller ones, refresh the RLB, and rewrite `ent`. */
+	bool MemoryManagementUnitVTSA::vtsaTryUpgrade(vtsa::RadixAddressSpaceView *view, vtsa::CertificateManager *mgr, IntPtr address, vtsa::CertRLB::Entry &ent, bool count, SubsecondTime &extra_latency)
+	{
+		static const int kUpGranBitsDesc[4] = {21, 18, 16, 14};
+
+		UInt64 &hits = m_vtsa_upgrade_hits[address >> 21];
+		hits++;
+		if (hits < m_vtsa_upgrade_interval)
+			return false;
+		hits = 0;
+		if (m_vtsa_cert_table_full)
+			return false;
+		if (count) vtsa_stats.upgrade_probes++;
+
+		for (int gi = 0; gi < 4; gi++)
+		{
+			int bits = kUpGranBitsDesc[gi];
+			UInt64 gran = 1ull << bits;
+			if (gran <= ent.gran)
+				break; /* descending list: nothing larger left */
+			IntPtr base = address & ~((IntPtr)gran - 1);
+			const char *why;
+			uint64_t checked = 0;
+			int rc = vtsa::CertificateManager::validate_range(view, base, gran, gran, &why, &checked);
+			if (count) vtsa_stats.cert_pte_reads += checked;
+			extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
+			if (rc != 0)
+				continue;
+			/* publish FIRST so a full table aborts without losing the
+			 * existing coverage */
+			int64_t id = mgr->publish(view, base, gran, gran);
+			if (id == -ENOSPC)
+			{
+				m_vtsa_cert_table_full = true;
+				return false;
+			}
+			if (id < 0)
+				continue;
+			mgr->revoke_overlapping_except(view, (uint64_t)base, gran, id);
+			m_vtsa_rlb->invalidate_overlap(view, (uint64_t)base, gran);
+			vtsa::CertStatus st;
+			mgr->get(id, &st);
+			m_vtsa_rlb->insert(view, st);
+			ent.va_base = st.va_base; ent.bytes = st.bytes; ent.gran = st.gran;
+			ent.id = st.id; ent.version = st.version; ent.as = view;
+			if (count)
+			{
+				vtsa_stats.upgrades++;
+				vtsa_stats.certifications++;
+				vtsaCountCertGran(gran);
+			}
+			return true;
 		}
 		return false;
 	}

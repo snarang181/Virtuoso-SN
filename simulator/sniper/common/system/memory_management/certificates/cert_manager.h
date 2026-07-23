@@ -108,6 +108,16 @@ public:
     void on_mutation(const AddressSpaceView *as, uint64_t va,
                      uint64_t bytes);
 
+    /* Granularity upgrade support: revoke every live cert of `as`
+     * overlapping [va, va+bytes) EXCEPT keep_id.  Used after publishing
+     * an enclosing larger-granularity certificate (safe order: publish
+     * first - ENOSPC aborts with the small certs intact - then subsume).
+     * Same RevokeDescriptor semantics per revoked slot (version bump);
+     * upgrades are not page-table mutations, so no TLB sweep is required
+     * (frames are unchanged; stale RLB entries die on version check). */
+    void revoke_overlapping_except(const AddressSpaceView *as, uint64_t va,
+                                   uint64_t bytes, int64_t keep_id);
+
     uint64_t live_count() const;
     uint64_t event_seq() const { return m_active ? m_seq : 0; }
 

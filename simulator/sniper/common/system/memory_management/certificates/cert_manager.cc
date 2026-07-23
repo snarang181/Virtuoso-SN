@@ -158,6 +158,28 @@ void CertificateManager::on_mutation(const AddressSpaceView *as, uint64_t va,
     }
 }
 
+/* Granularity upgrade: subsume smaller certificates under a freshly
+ * published larger one.  Caller publishes the large cert FIRST (so a full
+ * table aborts the upgrade without losing coverage), then calls this to
+ * retire the now-redundant smaller certs.  Each retirement is an ordinary
+ * revocation (version bump, logged with cause "upgrade"). */
+void CertificateManager::revoke_overlapping_except(const AddressSpaceView *as,
+                                                   uint64_t va,
+                                                   uint64_t bytes,
+                                                   int64_t keep_id)
+{
+    if (!m_active || bytes == 0)
+        return;
+    for (int64_t i = 0; i < kCertMax; i++) {
+        if (i == keep_id)
+            continue;
+        Cert &c = m_certs[i];
+        if (c.live && c.as == as && va < c.va_base + c.bytes &&
+            c.va_base < va + bytes)
+            revoke_slot(i, "upgrade");
+    }
+}
+
 /* ---- lifecycle --------------------------------------------------------- */
 
 int CertificateManager::init(const char *event_log_path)
