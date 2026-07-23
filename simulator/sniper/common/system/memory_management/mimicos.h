@@ -224,7 +224,45 @@ public:
             new vtsa::RadixAddressSpaceView(pt, app_id));
         auto *raw = view.get();
         m_vtsa_views[app_id] = std::move(view);
+        vtsaPreloadRegions(app_id);
         return raw;
+    }
+
+    /* Region-preload sidecar (trace replays): windowed traces recorded
+     * with record-trace -f fast-forward past allocation time, so the
+     * REGION_REGISTER magic ops are not in the trace. If
+     * $TSA_PRELOAD_REGIONS names the region file the hint runtime dumped
+     * at record time ("base_hex len flags_hex site_id" per line), those
+     * regions are registered here when the app's view is first created.
+     * Live (non-trace) runs deliver regions via magic ops and do not set
+     * the variable. */
+    void vtsaPreloadRegions(int app_id)
+    {
+        if (m_vtsa_preloaded.count(app_id))
+            return;
+        m_vtsa_preloaded.insert(app_id);
+        const char *path = getenv("TSA_PRELOAD_REGIONS");
+        if (!path || !*path)
+            return;
+        FILE *f = fopen(path, "r");
+        if (!f)
+            return;
+        unsigned long long base, len, site;
+        unsigned int flags;
+        int n = 0;
+        while (fscanf(f, "%llx %llu %x %llu", &base, &len, &flags, &site) == 4) {
+            vtsa::HintRegion r;
+            r.base = base;
+            r.len = len;
+            r.flags = flags;
+            r.site_id = site;
+            vtsaRegionRegister(app_id, r);
+            n++;
+        }
+        fclose(f);
+        std::cout << "[MimicOS] V-TSA preloaded " << n
+                  << " hint regions for app " << app_id << " from "
+                  << path << std::endl;
     }
 
     // V-TSA mutation entry points.  Contract: revoke overlapping certs
@@ -710,6 +748,7 @@ private:
     std::vector<vtsa::MutationSweepListener*> m_vtsa_sweep_listeners;
     std::unordered_map<int, std::vector<vtsa::HintRegion>> m_vtsa_hint_regions;
     UInt64 m_vtsa_hint_registered = 0;
+    std::unordered_set<int> m_vtsa_preloaded;
     std::unordered_map<int, std::unordered_set<uint64_t>> m_vtsa_cow_pages;
     std::unordered_map<uint64_t, uint64_t> m_vtsa_frame_refs;
     std::unique_ptr<vtsa::AdaptiveCowEstimator> m_vtsa_estimator;
