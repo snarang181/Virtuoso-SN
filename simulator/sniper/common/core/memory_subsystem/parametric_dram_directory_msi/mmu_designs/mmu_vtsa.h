@@ -168,6 +168,7 @@ namespace ParametricDramDirectoryMSI
 		UInt64 m_vtsa_k_budget;            // extra-PTE probe budget (bounded baseline)
 		UInt64 m_vtsa_miss_threshold;      // misses per 2MB window before auto-certify
 		UInt64 m_vtsa_upgrade_interval;    // cert hits per 2MB window between upgrade probes (0 = disabled)
+		int m_vtsa_max_gran_bits;          // granularity-ladder cap (ablation knob; 21 = full ladder)
 		std::unordered_map<IntPtr, UInt64> m_vtsa_upgrade_hits;  // per-window hits since last probe
 		vtsa::CertRLB *m_vtsa_rlb;
 		ComponentLatency *m_vtsa_cert_check_latency;

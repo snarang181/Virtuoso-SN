@@ -142,6 +142,7 @@ namespace ParametricDramDirectoryMSI
 			m_vtsa_k_budget = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/k_budget");
 			m_vtsa_miss_threshold = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/miss_threshold");
 			m_vtsa_upgrade_interval = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/upgrade_probe_interval");
+			m_vtsa_max_gran_bits = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/max_gran_bits");
 			UInt64 rlb_entries = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/rlb_entries");
 			m_vtsa_rlb = new vtsa::CertRLB(rlb_entries);
 			m_vtsa_cert_check_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cert_check_cycles"));
@@ -1955,6 +1956,8 @@ adaptive_gate_ok:;
 		for (int gi = 0; gi < 4; gi++)
 		{
 			int bits = kGranBitsDesc[gi];
+			if (bits > m_vtsa_max_gran_bits)
+				continue; /* ablation cap */
 			UInt64 gran = 1ull << bits;
 			IntPtr base = address & ~((IntPtr)gran - 1);
 			const char *why;
@@ -2104,6 +2107,8 @@ adaptive_gate_ok:;
 		for (int gi = 0; gi < 4; gi++)
 		{
 			int bits = kUpGranBitsDesc[gi];
+			if (bits > m_vtsa_max_gran_bits)
+				continue; /* ablation cap */
 			UInt64 gran = 1ull << bits;
 			if (gran <= ent.gran)
 				break; /* descending list: nothing larger left */
