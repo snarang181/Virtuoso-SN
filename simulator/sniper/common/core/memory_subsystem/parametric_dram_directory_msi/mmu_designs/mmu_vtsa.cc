@@ -2094,8 +2094,11 @@ adaptive_gate_ok:;
 		if (hits < m_vtsa_upgrade_interval)
 			return false;
 		hits = 0;
-		if (m_vtsa_cert_table_full)
-			return false;
+		/* NOTE: no table-full bail here. Upgrades are the mechanism that
+		 * FREES slots (each retires the subsumed smaller certs), so they
+		 * must run even - especially - when the table is full; the
+		 * full-table path below validates first, then frees, then
+		 * publishes. */
 		if (count) vtsa_stats.upgrade_probes++;
 
 		for (int gi = 0; gi < 4; gi++)
@@ -2117,10 +2120,24 @@ adaptive_gate_ok:;
 			int64_t id = mgr->publish(view, base, gran, gran);
 			if (id == -ENOSPC)
 			{
-				m_vtsa_cert_table_full = true;
-				return false;
+				/* Full table: validation above already proved the window
+				 * certifiable, so retiring the subsumed smaller certs
+				 * first is safe (frees their slots), then publish into a
+				 * freed slot. Deterministic in-sim: no intervening
+				 * mutation can invalidate the window between these
+				 * steps. */
+				mgr->revoke_overlapping_except(view, (uint64_t)base, gran, -1);
+				id = mgr->publish(view, base, gran, gran);
+				if (id == -ENOSPC)
+				{
+					m_vtsa_cert_table_full = true;
+					return false;
+				}
+				if (id < 0)
+					continue;
+				m_vtsa_cert_table_full = false; /* slots freed */
 			}
-			if (id < 0)
+			else if (id < 0)
 				continue;
 			mgr->revoke_overlapping_except(view, (uint64_t)base, gran, id);
 			m_vtsa_rlb->invalidate_overlap(view, (uint64_t)base, gran);
