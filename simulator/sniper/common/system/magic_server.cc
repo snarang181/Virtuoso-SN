@@ -258,6 +258,17 @@ UInt64 MagicServer::Magic_unlocked(thread_id_t thread_id, core_id_t core_id, UIn
          Sim()->getMimicOS()->vtsaForkMark(vtsa_thread ? vtsa_thread->getAppId() : 0);
          return 0;
       }
+      if (arg0 == vtsa::kVtsaCmdForkReal)
+      {
+         // P1 real fork: clone the calling app's address space into a
+         // child ApplicationContext (no child trace stream until P2).
+         // The child app id is returned to the traced app in rax.
+         Core *vtsa_core = Sim()->getCoreManager()->getCoreFromID(core_id);
+         Thread *vtsa_thread = vtsa_core->getThread();
+         int vtsa_child = Sim()->getMimicOS()->vtsaForkApplication(
+             vtsa_thread ? vtsa_thread->getAppId() : 0, core_id);
+         return vtsa_child < 0 ? 0 : (UInt64)vtsa_child;
+      }
       if (arg0 == vtsa::kVtsaCmdRegionRegister ||
           arg0 == vtsa::kVtsaCmdRegionUnregister ||
           arg0 == vtsa::kVtsaCmdMprotect)

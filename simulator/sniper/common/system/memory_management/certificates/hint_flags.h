@@ -54,6 +54,8 @@ enum HintMagicCmd : uint64_t
     kVtsaCmdRegionUnregister = 0x75A1, /* {u64 base, len}                 */
     kVtsaCmdMprotect         = 0x75A2, /* {u64 base, len, perms}          */
     kVtsaCmdForkMark         = 0x75A3, /* no descriptor: snapshot fork     */
+    kVtsaCmdForkReal         = 0x75A4, /* no descriptor: P1 real AS clone;
+                                          returns child app id in rax     */
 };
 
 struct HintRegion

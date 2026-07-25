@@ -1747,6 +1747,14 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_certs_gran_64k", &vtsa_stats.certs_gran_64k);
 		registerStatsMetric(name, core->getId(), "vtsa_certs_gran_256k", &vtsa_stats.certs_gran_256k);
 		registerStatsMetric(name, core->getId(), "vtsa_certs_gran_2m", &vtsa_stats.certs_gran_2m);
+		// P1 real fork counters live OS-side (one address-space clone per
+		// fork, not per core); register once via core 0.
+		if (core->getId() == 0 && Sim()->getMimicOS() != NULL)
+		{
+			registerStatsMetric(name, 0, "vtsa_fork_real_forks", Sim()->getMimicOS()->vtsaForkRealForksPtr());
+			registerStatsMetric(name, 0, "vtsa_fork_real_pages", Sim()->getMimicOS()->vtsaForkRealPagesPtr());
+			registerStatsMetric(name, 0, "vtsa_fork_real_skipped_vmas", Sim()->getMimicOS()->vtsaForkRealSkippedPtr());
+		}
 	}
 
 	void MemoryManagementUnitVTSA::vtsaCountCertGran(UInt64 gran)

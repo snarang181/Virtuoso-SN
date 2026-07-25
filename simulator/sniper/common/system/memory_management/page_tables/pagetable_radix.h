@@ -2,6 +2,7 @@
 #pragma once
 #include "pagetable.h"
 #include "sim_log.h"
+#include <functional>
 
 namespace ParametricDramDirectoryMSI
 {
@@ -60,9 +61,17 @@ namespace ParametricDramDirectoryMSI
 		~PageTableRadix();
 		PTWResult initializeWalk(IntPtr address, bool count, bool is_prefetch = false, bool restart_walk = false);
 		bool functionalLookup(IntPtr address, IntPtr *ppn, int *page_size) override;
+		/* V-TSA fork support: invoke cb(va, ppn, page_size_bits) for every
+		 * valid leaf mapping (page_size_bits 12 or 21; ppn is always
+		 * 4KB-granular). Functional walk - no timing, no stats. */
+		void enumerateMappings(const std::function<void(IntPtr, IntPtr, int)> &cb);
 		int updatePageTableFrames(IntPtr address, IntPtr core_id, IntPtr ppn, int page_size, std::vector<UInt64> frames);
 		void deletePage(IntPtr address);
 		IntPtr getPhysicalSpace(int size);
+	private:
+		void enumerateFrame(PTFrame *frame, IntPtr va_base, int depth,
+		                    const std::function<void(IntPtr, IntPtr, int)> &cb);
+	public:
 		String getType() { return "radix"; };
 		int getMaxLevel() { return levels; };
 	};

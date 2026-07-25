@@ -16,6 +16,7 @@
 #include "certificates/mutation_listener.h"
 #include "certificates/hint_flags.h"
 #include "certificates/adaptive_cow_estimator.h"
+#include "memory_management/page_tables/pagetable_radix.h"
 #include <unordered_set>
 
 #include <unordered_map>
@@ -496,6 +497,119 @@ public:
         return m_vtsa_estimator.get();
     }
 
+    // ============ P1 real fork: address-space clone (option 5c) =========
+    /* Clone the parent's populated leaf mappings + VMAs into a child
+     * ApplicationContext. The child does not execute until P2 (no trace
+     * stream bound), but the clone is real: leaf PTEs installed in a
+     * child page table (huge mappings shattered to 4KB - the classic COW
+     * clone; promotion can rebuild), both sides write-protected via the
+     * per-app permission overlays, per-frame refcounts shared across
+     * apps so a COW resolve on EITHER side copies-or-reuses correctly.
+     * Contract obligations: parent certificates overlapping cloned
+     * ranges are revoked+swept before fork returns
+     * (revoke-before-complete); the child starts with an empty
+     * certificate table (its view has no published certs). Returns the
+     * child app id, or -1 on failure. */
+    int vtsaForkApplication(int parent_app, UInt64 core_id)
+    {
+        ParametricDramDirectoryMSI::PageTable *ppt = getPageTable(parent_app);
+        vtsa::RadixAddressSpaceView *pview = getVtsaView(parent_app);
+        if (!ppt || !pview)
+            return -1;
+        int child_app = m_vtsa_next_fork_app++;
+        createApplication(child_app);
+        ParametricDramDirectoryMSI::PageTable *cpt = getPageTable(child_app);
+        if (!cpt)
+            return -1;
+        vtsa::RadixAddressSpaceView *cview = getVtsaView(child_app);
+        auto &pcow = m_vtsa_cow_pages[parent_app];
+        auto &ccow = m_vtsa_cow_pages[child_app];
+        /* Enumerate the parent's REAL populated mappings by walking its
+         * radix page table (VMA sidecars are absent for live runs and
+         * most traces - the page table is the ground truth). */
+        auto *pradix =
+            dynamic_cast<ParametricDramDirectoryMSI::PageTableRadix *>(ppt);
+        if (!pradix)
+            return -1;
+        std::vector<std::pair<IntPtr, IntPtr>> leaves; /* {va, frame} 4KB */
+        pradix->enumerateMappings([&](IntPtr va, IntPtr ppn, int bits) {
+            if (bits == 12) {
+                leaves.emplace_back(va, ppn);
+            } else { /* 2MB leaf: shatter to 4KB frames (classic COW clone) */
+                for (uint64_t j = 0; j < vtsa::kHugeFrames; j++)
+                    leaves.emplace_back(va + (IntPtr)(j * vtsa::kPageSize),
+                                        ppn + (IntPtr)j);
+            }
+        });
+        uint64_t cloned = 0;
+        IntPtr lo = 0, hi = 0;
+        /* The radix insert consumes pre-allocated page-table frames for
+         * new intermediate levels (up to levels-1 per insert); keep a
+         * small pool topped up and drop only what each insert consumed. */
+        std::vector<UInt64> ptframes;
+        for (const auto &m : leaves) {
+            IntPtr va = m.first;
+            uint64_t frame = (uint64_t)m.second;
+            uint64_t vpn = (uint64_t)va >> vtsa::kPageShift;
+            while (ptframes.size() < 3)
+                ptframes.push_back(
+                    m_memory_allocator->handle_page_table_allocations(4096));
+            int used = cpt->updatePageTableFrames(va, core_id, (IntPtr)frame,
+                                                  12, ptframes);
+            if (used > 0)
+                ptframes.erase(ptframes.begin(), ptframes.begin() + used);
+            if (!pcow.count(vpn)) {
+                pcow.insert(vpn);
+                pview->set_perms(vpn, vtsa::kPermU); /* drop W */
+            }
+            ccow.insert(vpn);
+            if (cview)
+                cview->set_perms(vpn, vtsa::kPermU);
+            uint64_t &refs = m_vtsa_frame_refs[frame];
+            refs = refs ? refs + 1 : 2;
+            cloned++;
+        }
+        /* revoke-before-complete on the parent, 4KB shootdown style. Sweep
+         * per CONTIGUOUS cloned run (the enumeration is VA-ordered), never
+         * the whole span - a live address space stretches from the binary
+         * to the stack and the shootdown loops are per-page. */
+        (void)lo; (void)hi;
+        size_t ri = 0;
+        while (ri < leaves.size()) {
+            IntPtr run_base = leaves[ri].first;
+            IntPtr run_end = run_base + (IntPtr)vtsa::kPageSize;
+            ri++;
+            while (ri < leaves.size() && leaves[ri].first == run_end) {
+                run_end += (IntPtr)vtsa::kPageSize;
+                ri++;
+            }
+            vtsaMutationSweepUnmapStyle(parent_app, run_base,
+                                        (UInt64)(run_end - run_base));
+        }
+        /* Child inherits the parent's hint regions (same VAs, same flags);
+         * certificates are NOT inherited - the child re-certifies. */
+        auto hit = m_vtsa_hint_regions.find(parent_app);
+        if (hit != m_vtsa_hint_regions.end())
+            m_vtsa_hint_regions[child_app] = hit->second;
+        m_vtsa_fork_real_forks++;
+        m_vtsa_fork_real_pages += cloned;
+        return child_app;
+    }
+
+    UInt64 vtsaForkRealStat(int which) const
+    {
+        switch (which) {
+        case 0: return m_vtsa_fork_real_forks;
+        case 1: return m_vtsa_fork_real_pages;
+        default: return m_vtsa_fork_real_skipped_vmas;
+        }
+    }
+    /* Stable pointers for registerStatsMetric (registered by core 0's
+     * vtsa MMU so the counters land in sim.stats exactly once). */
+    UInt64* vtsaForkRealForksPtr() { return &m_vtsa_fork_real_forks; }
+    UInt64* vtsaForkRealPagesPtr() { return &m_vtsa_fork_real_pages; }
+    UInt64* vtsaForkRealSkippedPtr() { return &m_vtsa_fork_real_skipped_vmas; }
+
     /* Like vtsaMutation but sweeps 4KB entries too (fork/unmap style). */
     void vtsaMutationSweepUnmapStyle(int app_id, IntPtr va, UInt64 bytes)
     {
@@ -757,6 +871,12 @@ private:
     UInt64 m_vtsa_cow_stats_faults = 0;
     UInt64 m_vtsa_cow_stats_copies = 0;
     UInt64 m_vtsa_cow_stats_reuses = 0;
+    // P1 real fork (option 5c): child app ids allocated from 1000 so they
+    // never collide with trace-stream app ids.
+    int m_vtsa_next_fork_app = 1000;
+    UInt64 m_vtsa_fork_real_forks = 0;
+    UInt64 m_vtsa_fork_real_pages = 0;
+    UInt64 m_vtsa_fork_real_skipped_vmas = 0;
     
     // ============ Page Fault State (per-core) ============
     std::vector<PageFaultState> m_pf_states;

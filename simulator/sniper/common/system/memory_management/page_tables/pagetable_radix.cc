@@ -441,4 +441,31 @@ namespace ParametricDramDirectoryMSI
 
                 return os->getMemoryAllocator()->handle_page_table_allocations(size);
         }
-    }
+    
+	void PageTableRadix::enumerateMappings(const std::function<void(IntPtr, IntPtr, int)> &cb)
+	{
+		enumerateFrame(root, 0, 1, cb);
+	}
+
+	void PageTableRadix::enumerateFrame(PTFrame *frame, IntPtr va_base, int depth,
+	                                    const std::function<void(IntPtr, IntPtr, int)> &cb)
+	{
+		if (frame == NULL || frame->entries == NULL)
+			return;
+		int shift = 12 + 9 * (levels - depth);
+		for (int i = 0; i < m_frame_size; i++)
+		{
+			PTEntry &e = frame->entries[i];
+			IntPtr va = va_base | ((IntPtr)i << shift);
+			if (e.is_pte)
+			{
+				if (e.data.translation.valid)
+					cb(va, e.data.translation.ppn, shift);
+			}
+			else if (e.data.next_level != NULL && depth < levels)
+			{
+				enumerateFrame(e.data.next_level, va, depth + 1, cb);
+			}
+		}
+	}
+}
