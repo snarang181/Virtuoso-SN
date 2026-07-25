@@ -1,1 +1,1 @@
-/mnt/panzer/kanellok/virtuoso_artifact/simulator/sniper/frontend/pin-frontend/../../common/misc/fixed_types.h
+/localhome/local-sanarang/Virtuoso/simulator/sniper/frontend/pin-frontend/../../common/misc/fixed_types.h

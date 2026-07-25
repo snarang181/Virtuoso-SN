@@ -1,1 +1,1 @@
-/mnt/panzer/kanellok/virtuoso_artifact/simulator/sniper/frontend/pin-frontend/../../sift/sift_reader.h
+/localhome/local-sanarang/Virtuoso/simulator/sniper/frontend/pin-frontend/../../sift/sift_reader.h
