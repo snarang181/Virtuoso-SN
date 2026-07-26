@@ -140,6 +140,7 @@ namespace ParametricDramDirectoryMSI
 			else if (vtsa_mode == "adaptive") m_vtsa_mode = VTSA_MODE_ADAPTIVE;
 			else m_vtsa_mode = VTSA_MODE_AUTO_CERTIFY;
 			m_vtsa_k_budget = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/k_budget");
+			m_vtsa_colt_mode = Sim()->getCfg()->hasKey("perf_model/" + name + "/vtsa/colt_mode") ? Sim()->getCfg()->getBool("perf_model/" + name + "/vtsa/colt_mode") : false;
 			m_vtsa_miss_threshold = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/miss_threshold");
 			m_vtsa_upgrade_interval = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/upgrade_probe_interval");
 			m_vtsa_max_gran_bits = Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/max_gran_bits");
@@ -1721,6 +1722,7 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_cert_pte_reads", &vtsa_stats.cert_pte_reads);
 		registerStatsMetric(name, core->getId(), "vtsa_probe_pte_reads", &vtsa_stats.probe_pte_reads);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_16k", &vtsa_stats.bounded_installs_16k);
+		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_32k", &vtsa_stats.bounded_installs_32k);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_64k", &vtsa_stats.bounded_installs_64k);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_256k", &vtsa_stats.bounded_installs_256k);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_2m", &vtsa_stats.bounded_installs_2m);
@@ -2016,14 +2018,14 @@ adaptive_gate_ok:;
 		for (uint64_t w = va >> 21; w <= (va + bytes - 1) >> 21; w++)
 			m_vtsa_hint_verdict_cache.erase((IntPtr)w);
 
-		static const int kSweepBitsCoalesced[4] = {14, 16, 18, 21};
+		static const int kSweepBitsCoalesced[5] = {14, 15, 16, 18, 21};
 		const TLBSubsystem &levels = tlb_subsystem->getTLBSubsystem();
 		for (UInt32 i = 0; i < levels.size(); i++)
 		{
 			for (UInt32 j = 0; j < levels[i].size(); j++)
 			{
 				TLB *tlb = levels[i][j];
-				for (int gi = 0; gi < 4; gi++)
+				for (int gi = 0; gi < 5; gi++)
 				{
 					int bits = kSweepBitsCoalesced[gi];
 					if (!tlb->supportsPageSize(bits))
@@ -2053,12 +2055,17 @@ adaptive_gate_ok:;
 	bool MemoryManagementUnitVTSA::vtsaBoundedProbe(vtsa::RadixAddressSpaceView *view, IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn)
 	{
 		static const int kGranBitsDesc[4] = {21, 18, 16, 14};
-		for (int gi = 0; gi < 4; gi++)
+		static const int kColtBitsDesc[2] = {15, 14};
+		const int *gran_desc = m_vtsa_colt_mode ? kColtBitsDesc : kGranBitsDesc;
+		int gran_count = m_vtsa_colt_mode ? 2 : 4;
+		for (int gi = 0; gi < gran_count; gi++)
 		{
-			int bits = kGranBitsDesc[gi];
+			int bits = gran_desc[gi];
 			UInt64 size = 1ull << bits;
 			UInt64 pages = size >> 12;
-			if (pages - 1 > m_vtsa_k_budget)
+			/* CoLT: the probe budget is the PTE cache line by construction
+			 * (8 PTEs = 32KB reach), not a charged k. */
+			if (!m_vtsa_colt_mode && pages - 1 > m_vtsa_k_budget)
 			{
 				if (count) vtsa_stats.bounded_skipped_budget++;
 				continue;
@@ -2069,7 +2076,10 @@ adaptive_gate_ok:;
 			int rc = vtsa::CertificateManager::validate_range(view, base, size, size, &why, &checked);
 			if (count) vtsa_stats.probe_pte_reads += checked;
 			if (count && rc != 0) vtsaCountRefusal(why, &vtsa_stats.refuse_absent, &vtsa_stats.refuse_perms, &vtsa_stats.refuse_align, &vtsa_stats.refuse_contig, &vtsa_stats.refuse_geometry);
-			extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
+			/* CoLT probes are free: the neighbours live in the PTE cache
+			 * line the walk already fetched. */
+			if (!m_vtsa_colt_mode)
+				extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
 			if (rc == 0)
 			{
 				vtsa::PageInfo pi;
@@ -2079,6 +2089,7 @@ adaptive_gate_ok:;
 				if (count)
 				{
 					if (bits == 14) vtsa_stats.bounded_installs_16k++;
+					else if (bits == 15) vtsa_stats.bounded_installs_32k++;
 					else if (bits == 16) vtsa_stats.bounded_installs_64k++;
 					else if (bits == 18) vtsa_stats.bounded_installs_256k++;
 					else vtsa_stats.bounded_installs_2m++;

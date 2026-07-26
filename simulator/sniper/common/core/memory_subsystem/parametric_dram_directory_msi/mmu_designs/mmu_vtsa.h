@@ -165,7 +165,11 @@ namespace ParametricDramDirectoryMSI
 		// ================= V-TSA certification layer =================
 		enum VtsaMode { VTSA_MODE_OFF = 0, VTSA_MODE_HARDWARE_K, VTSA_MODE_AUTO_CERTIFY, VTSA_MODE_CERTIFIED, VTSA_MODE_ADAPTIVE };
 		VtsaMode m_vtsa_mode;
-		UInt64 m_vtsa_k_budget;            // extra-PTE probe budget (bounded baseline)
+		UInt64 m_vtsa_k_budget;
+		/* CoLT-mode baseline: probes limited to the faulting PTE's cache
+		 * line (8 PTEs) but UNCHARGED (the walk fetched the line anyway);
+		 * installs up to 32KB (15 bits). Baseline realism check vs k4. */
+		bool m_vtsa_colt_mode;            // extra-PTE probe budget (bounded baseline)
 		UInt64 m_vtsa_miss_threshold;      // misses per 2MB window before auto-certify
 		UInt64 m_vtsa_upgrade_interval;    // cert hits per 2MB window between upgrade probes (0 = disabled)
 		int m_vtsa_max_gran_bits;          // granularity-ladder cap (ablation knob; 21 = full ladder)
@@ -189,6 +193,7 @@ namespace ParametricDramDirectoryMSI
 			UInt64 cert_pte_reads;
 			UInt64 probe_pte_reads;
 			UInt64 bounded_installs_16k;
+			UInt64 bounded_installs_32k;
 			UInt64 bounded_installs_64k;
 			UInt64 bounded_installs_256k;
 			UInt64 bounded_installs_2m;

@@ -137,9 +137,14 @@ public:
 
     static bool gran_allowed(uint64_t gran)
     {
+        /* 32KB is NOT a V-TSA certificate granularity - it exists only
+         * for the CoLT-mode baseline's bounded probe (one PTE cache
+         * line = 8 pages), which reuses validate_range as its
+         * contiguity check. Certificates are never published at 32KB
+         * (certify paths use the {4K,16K,64K,256K,2M} ladder only). */
         return gran == kPageSize || gran == (16ull << 10) ||
-               gran == (64ull << 10) || gran == (256ull << 10) ||
-               gran == kHugeSize;
+               gran == (32ull << 10) || gran == (64ull << 10) ||
+               gran == (256ull << 10) || gran == kHugeSize;
     }
 
 private:
