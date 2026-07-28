@@ -835,6 +835,43 @@ namespace ParametricDramDirectoryMSI
             // Record time before PTW for latency calculation
             SubsecondTime time_for_pt = shmem_perf_model->getElapsedTime(ShmemPerfModel::_USER_THREAD);
 
+            // ============ V-TSA walk bypass (the design fast path) ==========
+            // A version-valid certificate IS the translation: base frame +
+            // offset, O(1) via RLB/cert check. Only when no live cert covers
+            // the address do we pay the authoritative walk; certification,
+            // hint gating, COW resolution and the estimator all run on the
+            // walk path below, exactly once, as before. COW-marked pages
+            // never bypass (their misses must reach the resolve path).
+            bool vtsa_walk_bypassed = false;
+            if (m_vtsa_mode != VTSA_MODE_OFF && m_vtsa_mode != VTSA_MODE_HARDWARE_K &&
+                !Sim()->getMimicOS()->vtsaIsCow(core->getThread()->getAppId(), (uint64_t)address))
+            {
+                SubsecondTime vtsa_hit_latency = SubsecondTime::Zero();
+                int vtsa_hit_bits = 0;
+                IntPtr vtsa_hit_ppn = 0;
+                if (vtsaConsult(address, count, vtsa_hit_latency, vtsa_hit_bits, vtsa_hit_ppn, true))
+                {
+                    ppn_result = vtsa_hit_ppn;
+                    page_size = vtsa_hit_bits;
+                    total_walk_latency = vtsa_hit_latency;
+                    translation_latency = charged_tlb_latency + total_walk_latency;
+                    shmem_perf_model->setElapsedTime(ShmemPerfModel::_USER_THREAD, time_for_pt + vtsa_hit_latency);
+                    performed_ptw = true;
+                    vtsa_walk_bypassed = true;
+                    if (count)
+                    {
+                        vtsa_stats.walk_bypasses++;
+                        translation_stats.total_walk_latency += total_walk_latency;
+                        if (instruction)
+                            translation_stats.total_walk_latency_instruction += total_walk_latency;
+                        else
+                            translation_stats.total_walk_latency_data += total_walk_latency;
+                    }
+                }
+            }
+            if (!vtsa_walk_bypassed)
+            {
+
             // Create MSHR entry to track this page table walk
             struct MSHREntry pt_walker_entry; 
             pt_walker_entry.request_time = time_for_pt;
@@ -999,8 +1036,12 @@ namespace ParametricDramDirectoryMSI
                     {
                         bool vtsa_copied = vtsa_os->vtsaCowResolve(core->getThread()->getAppId(), address, core->getId());
                         vtsa_latency += m_vtsa_cow_fault_latency->getLatency();
+                        vtsa_stats.charged_cow += m_vtsa_cow_fault_latency->getLatency();
                         if (vtsa_copied)
+                        {
                             vtsa_latency += m_vtsa_cow_copy_latency->getLatency();
+                            vtsa_stats.charged_cow += m_vtsa_cow_copy_latency->getLatency();
+                        }
                         if (count)
                         {
                             vtsa_stats.cow_faults++;
@@ -1031,6 +1072,8 @@ namespace ParametricDramDirectoryMSI
                         shmem_perf_model->getElapsedTime(ShmemPerfModel::_USER_THREAD) + vtsa_latency);
                 }
             }
+
+            } // end !vtsa_walk_bypassed
 
             mmu_log->debug("New time after charging PTW completion: " + 
                           std::to_string(shmem_perf_model->getElapsedTime(ShmemPerfModel::_USER_THREAD).getNS()) + "ns");
@@ -1723,6 +1766,13 @@ namespace ParametricDramDirectoryMSI
 		registerStatsMetric(name, core->getId(), "vtsa_probe_pte_reads", &vtsa_stats.probe_pte_reads);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_16k", &vtsa_stats.bounded_installs_16k);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_32k", &vtsa_stats.bounded_installs_32k);
+		registerStatsMetric(name, core->getId(), "vtsa_walk_bypasses", &vtsa_stats.walk_bypasses);
+		registerStatsMetric(name, core->getId(), "vtsa_charged_probe", &vtsa_stats.charged_probe);
+		registerStatsMetric(name, core->getId(), "vtsa_charged_certify", &vtsa_stats.charged_certify);
+		registerStatsMetric(name, core->getId(), "vtsa_charged_cert_check", &vtsa_stats.charged_cert_check);
+		registerStatsMetric(name, core->getId(), "vtsa_charged_rlb_miss", &vtsa_stats.charged_rlb_miss);
+		registerStatsMetric(name, core->getId(), "vtsa_charged_metadata", &vtsa_stats.charged_metadata);
+		registerStatsMetric(name, core->getId(), "vtsa_charged_cow", &vtsa_stats.charged_cow);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_64k", &vtsa_stats.bounded_installs_64k);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_256k", &vtsa_stats.bounded_installs_256k);
 		registerStatsMetric(name, core->getId(), "vtsa_bounded_installs_2m", &vtsa_stats.bounded_installs_2m);
@@ -1782,7 +1832,7 @@ namespace ParametricDramDirectoryMSI
 	 *   per 2MB window and at the threshold attempt certification with
 	 *   granularity fallback 2MB -> 256KB -> 64KB -> 16KB (validation
 	 *   charged per PTE read; publish refusal leaves no state). */
-	bool MemoryManagementUnitVTSA::vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn)
+	bool MemoryManagementUnitVTSA::vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn, bool hit_only)
 	{
 		static const int kGranBitsDesc[4] = {21, 18, 16, 14};
 
@@ -1794,7 +1844,7 @@ namespace ParametricDramDirectoryMSI
 			return false;
 
 		if (m_vtsa_mode == VTSA_MODE_HARDWARE_K)
-			return vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
+			return hit_only ? false : vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
 
 		// ---- auto_certify ----
 		vtsa::CertRLB::Entry ent;
@@ -1802,6 +1852,7 @@ namespace ParametricDramDirectoryMSI
 		if (m_vtsa_rlb->lookup(view, (uint64_t)address, *mgr, &ent))
 		{
 			extra_latency += m_vtsa_cert_check_latency->getLatency();
+			vtsa_stats.charged_cert_check += m_vtsa_cert_check_latency->getLatency();
 			if (count) vtsa_stats.cert_checks++;
 			have_cert = true;
 		}
@@ -1811,6 +1862,8 @@ namespace ParametricDramDirectoryMSI
 			if (mgr->check(view, (uint64_t)address, &st) == 0)
 			{
 				extra_latency += m_vtsa_cert_check_latency->getLatency() + m_vtsa_rlb_miss_latency->getLatency();
+				vtsa_stats.charged_cert_check += m_vtsa_cert_check_latency->getLatency();
+				vtsa_stats.charged_rlb_miss += m_vtsa_rlb_miss_latency->getLatency();
 				if (count) { vtsa_stats.cert_checks++; vtsa_stats.rlb_reloads++; }
 				m_vtsa_rlb->insert(view, st);
 				ent.va_base = st.va_base; ent.bytes = st.bytes; ent.gran = st.gran;
@@ -1849,6 +1902,12 @@ namespace ParametricDramDirectoryMSI
 			return false;
 		}
 
+		// hit-only probe (pre-walk bypass): no certification attempts -
+		// the certify/estimator/hint machinery runs once, on the walk
+		// path, exactly as before the bypass existed.
+		if (hit_only)
+			return false;
+
 		// certified (hint-gated) mode: the metadata gate decides whether
 		// this window may certify at all. Verdict cached per 2MB window;
 		// the metadata lookup + region check is charged once per window
@@ -1869,7 +1928,7 @@ namespace ParametricDramDirectoryMSI
 					return vtsaBoundedProbe(view, address, count, extra_latency, out_bits, out_ppn);
 				goto adaptive_gate_ok;
 			}
-			extra_latency += m_vtsa_metadata_latency->getLatency();
+			extra_latency += m_vtsa_metadata_latency->getLatency(); vtsa_stats.charged_metadata += m_vtsa_metadata_latency->getLatency();
 			vtsa::HintRegion hr;
 			if (!Sim()->getMimicOS()->vtsaHintFor(app_id, (uint64_t)address, &hr))
 			{
@@ -1927,7 +1986,7 @@ adaptive_gate_ok:;
 			}
 			else
 			{
-				extra_latency += m_vtsa_metadata_latency->getLatency();
+				extra_latency += m_vtsa_metadata_latency->getLatency(); vtsa_stats.charged_metadata += m_vtsa_metadata_latency->getLatency();
 				vtsa::HintRegion hr;
 				if (!Sim()->getMimicOS()->vtsaHintFor(app_id, (uint64_t)address, &hr))
 				{
@@ -1976,6 +2035,7 @@ adaptive_gate_ok:;
 			if (count) vtsa_stats.cert_pte_reads += checked;
 			if (count && rc != 0) vtsaCountRefusal(why, &vtsa_stats.refuse_absent, &vtsa_stats.refuse_perms, &vtsa_stats.refuse_align, &vtsa_stats.refuse_contig, &vtsa_stats.refuse_geometry);
 			extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
+			vtsa_stats.charged_certify += m_vtsa_pte_probe_latency->getLatency() * checked;
 			if (rc != 0)
 				continue;
 			int64_t id = mgr->publish(view, base, gran, gran);
@@ -2079,7 +2139,10 @@ adaptive_gate_ok:;
 			/* CoLT probes are free: the neighbours live in the PTE cache
 			 * line the walk already fetched. */
 			if (!m_vtsa_colt_mode)
+			{
 				extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
+				vtsa_stats.charged_probe += m_vtsa_pte_probe_latency->getLatency() * checked;
+			}
 			if (rc == 0)
 			{
 				vtsa::PageInfo pi;
@@ -2137,6 +2200,7 @@ adaptive_gate_ok:;
 			int rc = vtsa::CertificateManager::validate_range(view, base, gran, gran, &why, &checked);
 			if (count) vtsa_stats.cert_pte_reads += checked;
 			extra_latency += m_vtsa_pte_probe_latency->getLatency() * checked;
+			vtsa_stats.charged_certify += m_vtsa_pte_probe_latency->getLatency() * checked;
 			if (rc != 0)
 				continue;
 			/* publish FIRST so a full table aborts without losing the

@@ -192,8 +192,20 @@ namespace ParametricDramDirectoryMSI
 			UInt64 rlb_reloads;
 			UInt64 cert_pte_reads;
 			UInt64 probe_pte_reads;
+			UInt64 walk_bypasses;
 			UInt64 bounded_installs_16k;
 			UInt64 bounded_installs_32k;
+			/* Charge decomposition: charged time per V-TSA cost component
+			 * (probe = bounded per-miss validation; certify = certification
+			 * /upgrade validation walks; cert_check = O(1) hit checks;
+			 * rlb_miss; metadata; cow). Base page walks are charged by the
+			 * common MMU path, not here. */
+			SubsecondTime charged_probe;
+			SubsecondTime charged_certify;
+			SubsecondTime charged_cert_check;
+			SubsecondTime charged_rlb_miss;
+			SubsecondTime charged_metadata;
+			SubsecondTime charged_cow;
 			UInt64 bounded_installs_64k;
 			UInt64 bounded_installs_256k;
 			UInt64 bounded_installs_2m;
@@ -222,7 +234,7 @@ namespace ParametricDramDirectoryMSI
 			UInt64 certs_gran_2m;
 		} vtsa_stats;
 		void registerVTSAStats();
-		bool vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);
+		bool vtsaConsult(IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn, bool hit_only = false);
 		bool vtsaBoundedProbe(vtsa::RadixAddressSpaceView *view, IntPtr address, bool count, SubsecondTime &extra_latency, int &out_bits, IntPtr &out_ppn);
 		bool vtsaTryUpgrade(vtsa::RadixAddressSpaceView *view, vtsa::CertificateManager *mgr, IntPtr address, vtsa::CertRLB::Entry &ent, bool count, SubsecondTime &extra_latency);
 		void vtsaCountCertGran(UInt64 gran);
