@@ -1873,6 +1873,23 @@ namespace ParametricDramDirectoryMSI
 		}
 		if (have_cert)
 		{
+			// Upgrade probing is certify machinery and stays OFF the
+			// hit-only bypass path (it can revoke/republish - a bypass
+			// must never return a translation whose cert it just
+			// mutated, with no walk behind it). The bypass still drives
+			// the cadence: it counts hits, and when the interval fires
+			// for a below-max cert it DECLINES, so that one miss takes
+			// the walk path where the full consult runs the upgrade.
+			if (hit_only)
+			{
+				if (m_vtsa_upgrade_interval > 0 && ent.gran < vtsa::kHugeSize)
+				{
+					UInt64 &bypass_hits = m_vtsa_upgrade_hits[address >> 21];
+					if (bypass_hits + 1 >= m_vtsa_upgrade_interval)
+						return false; /* walk-path consult will upgrade */
+					bypass_hits++;
+				}
+			}
 			// Granularity-upgrade probe: a hit on a below-max certificate
 			// periodically re-validates the enclosing larger window (the
 			// mosaic left by mid-population certification caps TLB reach;
@@ -1880,7 +1897,7 @@ namespace ParametricDramDirectoryMSI
 			// coverage intact on ENOSPC; subsumed certs are then revoked
 			// (version bump - stale RLB entries die on the version check;
 			// no TLB sweep needed since no frame moved).
-			if (m_vtsa_upgrade_interval > 0 && ent.gran < vtsa::kHugeSize &&
+			else if (m_vtsa_upgrade_interval > 0 && ent.gran < vtsa::kHugeSize &&
 			    vtsaTryUpgrade(view, mgr, address, ent, count, extra_latency))
 			{
 				/* ent now describes the upgraded certificate */
