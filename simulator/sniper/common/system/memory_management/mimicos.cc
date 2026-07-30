@@ -205,6 +205,9 @@ void MimicOS::createApplication(int app_id)
     }
     
     m_applications[app_id] = std::move(app);
+
+    // Warm-start replay support (no-op unless $VTSA_PREWARM_PAGES set)
+    vtsaPrewarmPages(app_id);
     
 #if DEBUG_MIMICOS >= DEBUG_BASIC
     m_log << "[MimicOS] Application " << app_id << " created successfully" << std::endl;

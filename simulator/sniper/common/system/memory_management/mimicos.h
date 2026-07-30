@@ -596,6 +596,56 @@ public:
         return child_app;
     }
 
+    /* Warm-start replay: install PTEs for every VPN listed in
+     * $VTSA_PREWARM_PAGES (one decimal VPN per line) through the normal
+     * allocator, at application creation. Models a long-running process
+     * whose footprint faulted in before the measurement window - the
+     * discriminating experiment for population-churn vs genuine-limit
+     * on server workloads. Scheme-neutral: allocation follows the
+     * scheme's own policy (instant-promote THP gets 2MB frames here,
+     * exactly as its first-touch reservation would). */
+    void vtsaPrewarmPages(int app_id)
+    {
+        const char *path = getenv("VTSA_PREWARM_PAGES");
+        if (!path)
+            return;
+        ParametricDramDirectoryMSI::PageTable *pt = getPageTable(app_id);
+        if (!pt)
+            return;
+        FILE *f = fopen(path, "r");
+        if (!f)
+            return;
+        std::vector<UInt64> ptframes;
+        unsigned long long vpn;
+        uint64_t warmed = 0, skipped = 0;
+        while (fscanf(f, "%llu", &vpn) == 1) {
+            IntPtr va = (IntPtr)vpn << 12;
+            IntPtr have_ppn = 0;
+            int have_ps = 0;
+            if (pt->functionalLookup(va, &have_ppn, &have_ps)) {
+                skipped++; /* covered by an earlier 2MB install */
+                continue;
+            }
+            auto alloc = m_memory_allocator->allocate(4096, (UInt64)va, 0,
+                                                      false, false);
+            if (alloc.first == (UInt64)-1)
+                continue;
+            while (ptframes.size() < 3)
+                ptframes.push_back(
+                    m_memory_allocator->handle_page_table_allocations(4096));
+            int used = pt->updatePageTableFrames(
+                alloc.second == 21 ? (va & ~((IntPtr)(1 << 21) - 1)) : va, 0,
+                (IntPtr)alloc.first, alloc.second, ptframes);
+            if (used > 0)
+                ptframes.erase(ptframes.begin(), ptframes.begin() + used);
+            warmed++;
+        }
+        fclose(f);
+        m_log << "[MimicOS] V-TSA prewarmed " << warmed
+              << " pages (skipped " << skipped << ") for app " << app_id
+              << " from " << path << std::endl;
+    }
+
     UInt64 vtsaForkRealStat(int which) const
     {
         switch (which) {
