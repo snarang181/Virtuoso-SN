@@ -333,7 +333,70 @@ public:
     {
         m_vtsa_hint_regions[app_id].push_back(r);
         m_vtsa_hint_registered++;
+        if (r.flags & vtsa::kHintCertOnReserve)
+            vtsaCertOnReserve(app_id, r);
     }
+
+    /* CERT_ON_RESERVE (compiler-directed commitment): commit the whole
+     * region's frames through the allocator (they are determined by the
+     * reservation's natural-offset placement) and publish 2MB
+     * certificates over every aligned window, all at registration time,
+     * before the first touch. The region then has huge-page temporal
+     * behavior (reach from t=0, no population churn) while keeping
+     * certificate semantics: revocable, versioned, never migrated.
+     * Contract note: publish-after-validate holds - pages are present
+     * by the time publish() validates, because commitment precedes it;
+     * reservation break joins the revocation triggers via the ordinary
+     * munmap path. Bloat safety is the COMPILER's proof obligation
+     * (density); the OS just executes the policy. */
+    void vtsaCertOnReserve(int app_id, const vtsa::HintRegion &r)
+    {
+        ParametricDramDirectoryMSI::PageTable *pt = getPageTable(app_id);
+        vtsa::RadixAddressSpaceView *view = getVtsaView(app_id);
+        vtsa::CertificateManager *mgr = getVtsaCertManager();
+        if (!pt || !view || !mgr)
+            return;
+        std::vector<UInt64> ptframes;
+        uint64_t committed = 0;
+        IntPtr base = (IntPtr)r.base & ~(IntPtr)(vtsa::kPageSize - 1);
+        IntPtr end = (IntPtr)(r.base + r.len);
+        for (IntPtr va = base; va < end; va += (IntPtr)vtsa::kPageSize) {
+            IntPtr ppn = 0; int ps = 0;
+            if (pt->functionalLookup(va, &ppn, &ps))
+                continue;
+            auto alloc = m_memory_allocator->allocate(4096, (UInt64)va, 0,
+                                                      false, false);
+            if (alloc.first == (UInt64)-1)
+                continue;
+            while (ptframes.size() < 3)
+                ptframes.push_back(
+                    m_memory_allocator->handle_page_table_allocations(4096));
+            int used = pt->updatePageTableFrames(
+                alloc.second == 21 ? (va & ~((IntPtr)vtsa::kHugeSize - 1)) : va,
+                0, (IntPtr)alloc.first, alloc.second, ptframes);
+            if (used > 0)
+                ptframes.erase(ptframes.begin(), ptframes.begin() + used);
+            committed++;
+        }
+        uint64_t published = 0;
+        IntPtr wbase = ((IntPtr)r.base + (IntPtr)vtsa::kHugeSize - 1) &
+                       ~(IntPtr)(vtsa::kHugeSize - 1);
+        for (IntPtr w = wbase; w + (IntPtr)vtsa::kHugeSize <= end;
+             w += (IntPtr)vtsa::kHugeSize)
+            if (mgr->publish(view, (uint64_t)w, vtsa::kHugeSize,
+                             vtsa::kHugeSize) >= 0)
+                published++;
+        m_vtsa_cor_regions++;
+        m_vtsa_cor_pages += committed;
+        m_vtsa_cor_certs += published;
+        m_log << "[MimicOS] CERT_ON_RESERVE app " << app_id << " region "
+              << (void*)r.base << " len " << r.len << ": committed "
+              << committed << " pages, published " << published
+              << " x 2MB certs" << std::endl;
+    }
+    UInt64* vtsaCorRegionsPtr() { return &m_vtsa_cor_regions; }
+    UInt64* vtsaCorPagesPtr() { return &m_vtsa_cor_pages; }
+    UInt64* vtsaCorCertsPtr() { return &m_vtsa_cor_certs; }
 
     void vtsaRegionUnregister(int app_id, IntPtr base, UInt64 len)
     {
@@ -927,6 +990,9 @@ private:
     UInt64 m_vtsa_fork_real_forks = 0;
     UInt64 m_vtsa_fork_real_pages = 0;
     UInt64 m_vtsa_fork_real_skipped_vmas = 0;
+    UInt64 m_vtsa_cor_regions = 0;
+    UInt64 m_vtsa_cor_pages = 0;
+    UInt64 m_vtsa_cor_certs = 0;
     
     // ============ Page Fault State (per-core) ============
     std::vector<PageFaultState> m_pf_states;

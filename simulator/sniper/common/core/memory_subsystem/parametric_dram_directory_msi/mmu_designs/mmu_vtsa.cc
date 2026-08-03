@@ -1806,6 +1806,9 @@ namespace ParametricDramDirectoryMSI
 			registerStatsMetric(name, 0, "vtsa_fork_real_forks", Sim()->getMimicOS()->vtsaForkRealForksPtr());
 			registerStatsMetric(name, 0, "vtsa_fork_real_pages", Sim()->getMimicOS()->vtsaForkRealPagesPtr());
 			registerStatsMetric(name, 0, "vtsa_fork_real_skipped_vmas", Sim()->getMimicOS()->vtsaForkRealSkippedPtr());
+			registerStatsMetric(name, 0, "vtsa_cor_regions", Sim()->getMimicOS()->vtsaCorRegionsPtr());
+			registerStatsMetric(name, 0, "vtsa_cor_pages", Sim()->getMimicOS()->vtsaCorPagesPtr());
+			registerStatsMetric(name, 0, "vtsa_cor_certs", Sim()->getMimicOS()->vtsaCorCertsPtr());
 		}
 	}
 

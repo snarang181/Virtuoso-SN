@@ -28,6 +28,12 @@ enum HintFlag : uint32_t
     kHintReuseLikely     = 1u << 6,
     kHintPhaseLocal      = 1u << 7,
     kHintDemandFragmented= 1u << 8,
+    /* Compiler-directed reservation-time certification: the pass proved
+     * the site dense + hot + long-lived + fork-free, so committing the
+     * region's reservation and publishing 2MB certificates AT
+     * REGISTRATION is bloat-free by construction. Orthogonal to
+     * hint_qualifies (which gates lazy certification). */
+    kHintCertOnReserve   = 1u << 9,
 };
 
 constexpr uint32_t kHintForbiddenMask =
