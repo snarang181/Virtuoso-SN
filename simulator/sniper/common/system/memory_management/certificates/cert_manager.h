@@ -56,8 +56,13 @@ namespace vtsa
 /* Port delta (recorded): ukern used 256 slots for few, large,
  * region-granularity certificates; the Virtuoso port certifies per
  * gran-window, so large working sets need a bigger table. Slot reuse
- * and version continuity are unchanged. */
-constexpr int64_t kCertMax = 4096;
+ * and version continuity are unchanged.
+ * kCertMax is the STORAGE bound; the effective capacity is runtime
+ * configurable (set_capacity, default 4096 = the historical constant,
+ * config key perf_model/mmu/vtsa/cert_table_entries) so provisioning
+ * is recorded in every run's sim.cfg. */
+constexpr int64_t kCertMax = 16384;
+constexpr int64_t kCertDefaultCapacity = 4096;
 
 struct CertStatus
 {
@@ -85,6 +90,11 @@ public:
      * -ENOSPC (table full). */
     int64_t publish(const AddressSpaceView *as, uint64_t va, uint64_t bytes,
                     uint64_t gran);
+
+    /* Effective table capacity (slots eligible for publish); clamped to
+     * [1, kCertMax].  Existing live certificates are unaffected. */
+    void set_capacity(int64_t n);
+    int64_t capacity() const { return m_capacity; }
 
     /* RevokeDescriptor: -EINVAL bad id, -ENOENT not live, else 0. */
     int revoke(int64_t id);
@@ -170,6 +180,7 @@ private:
     std::FILE *m_log    = nullptr;
     uint64_t   m_seq    = 0;
     Cert       m_certs[kCertMax];
+    int64_t    m_capacity = kCertDefaultCapacity;
 };
 
 } // namespace vtsa

@@ -223,6 +223,13 @@ CertificateManager::~CertificateManager()
 
 /* ---- PublishDescriptor -------------------------------------------------- */
 
+void CertificateManager::set_capacity(int64_t n)
+{
+    if (n < 1) n = 1;
+    if (n > kCertMax) n = kCertMax;
+    m_capacity = n;
+}
+
 int64_t CertificateManager::publish(const AddressSpaceView *as, uint64_t va,
                                     uint64_t bytes, uint64_t gran)
 {
@@ -239,7 +246,7 @@ int64_t CertificateManager::publish(const AddressSpaceView *as, uint64_t va,
         return -EINVAL;
     }
     int64_t id = -1;
-    for (int64_t i = 0; i < kCertMax; i++)
+    for (int64_t i = 0; i < m_capacity; i++)
         if (!m_certs[i].live) {
             id = i;
             break;

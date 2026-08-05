@@ -152,6 +152,8 @@ namespace ParametricDramDirectoryMSI
 			m_vtsa_metadata_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/metadata_lookup_cycles"));
 			m_vtsa_cow_fault_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cow_fault_cycles"));
 			m_vtsa_cow_copy_latency = new ComponentLatency(core->getDvfsDomain(), Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cow_copy_cycles"));
+			int64_t cert_table_entries = Sim()->getCfg()->hasKey("perf_model/" + name + "/vtsa/cert_table_entries") ? Sim()->getCfg()->getInt("perf_model/" + name + "/vtsa/cert_table_entries") : vtsa::kCertDefaultCapacity;
+			Sim()->getMimicOS()->getVtsaCertManager()->set_capacity(cert_table_entries);
 			memset(&vtsa_stats, 0, sizeof(vtsa_stats));
 			registerVTSAStats();
 			if (m_vtsa_mode != VTSA_MODE_OFF)
